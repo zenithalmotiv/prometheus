@@ -5,6 +5,7 @@ Handles text messages and document uploads.
 
 import csv
 import io
+import re
 from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup
 from telegram.ext import ContextTypes
 
@@ -23,6 +24,18 @@ from handlers.callback_handler import (
     get_session, main_menu_keyboard, inventory_menu_keyboard,
     item_select_keyboard, purposes_menu_keyboard, admin_menu_keyboard,
 )
+
+
+def auto_item_id(item_name: str, existing_ids: list) -> str:
+    """Generate a unique item ID from the item name."""
+    # Take first 3 letters uppercased
+    base = re.sub(r'[^A-Za-z]', '', item_name).upper()[:3] or "ITM"
+    counter = 1
+    candidate = f"{base}{counter:03d}"
+    while candidate in existing_ids:
+        counter += 1
+        candidate = f"{base}{counter:03d}"
+    return candidate
 
 
 async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -255,22 +268,40 @@ async def handle_check_stock(update: Update, context: ContextTypes.DEFAULT_TYPE,
 
 
 async def handle_add_item(update: Update, context: ContextTypes.DEFAULT_TYPE, text: str):
-    """Handle add item input."""
+    """Handle add item input. ID is auto-generated if not provided."""
     parts = [p.strip() for p in text.split("|")]
-    if len(parts) < 3:
+
+    # Simple format: name | unit | stock | avg_usage (no ID)
+    # Full format:   id | name | unit | stock | current | avg
+    # Detect by checking if first part looks like a name (not an ID code)
+    existing_ids = [it["item_id"] for it in get_all_items()]
+
+    if len(parts) >= 2:
+        # If first part has spaces or is longer than 6 chars, treat as name
+        if " " in parts[0] or len(parts[0]) > 6:
+            # Simple format: name | unit | stock | avg_usage
+            item_name = parts[0]
+            unit = parts[1] if len(parts) > 1 else "pcs"
+            starting_stock = float(parts[2]) if len(parts) > 2 else 0
+            current_stock = starting_stock
+            avg_usage = float(parts[3]) if len(parts) > 3 else 0
+            item_id = auto_item_id(item_name, existing_ids)
+        else:
+            # Full format with ID
+            item_id = parts[0]
+            item_name = parts[1] if len(parts) > 1 else ""
+            unit = parts[2] if len(parts) > 2 else "pcs"
+            starting_stock = float(parts[3]) if len(parts) > 3 else 0
+            current_stock = float(parts[4]) if len(parts) > 4 else starting_stock
+            avg_usage = float(parts[5]) if len(parts) > 5 else 0
+    else:
         await update.message.reply_text(
-            "Invalid format. Use: `item_id | name | unit | starting_stock | current_stock | avg_usage`\n"
-            "Example: `R001 | Rice | kg | 100 | 100 | 40`",
+            "Invalid format. Use:\n"
+            "`Name | unit | stock | avg_usage`\n"
+            "Example: `Rice | kg | 100 | 40`",
             parse_mode="Markdown"
         )
         return
-
-    item_id = parts[0]
-    item_name = parts[1]
-    unit = parts[2]
-    starting_stock = float(parts[3]) if len(parts) > 3 else 0
-    current_stock = float(parts[4]) if len(parts) > 4 else starting_stock
-    avg_usage = float(parts[5]) if len(parts) > 5 else 0
 
     ok, msg = add_single_item(
         item_id=item_id,
@@ -280,24 +311,53 @@ async def handle_add_item(update: Update, context: ContextTypes.DEFAULT_TYPE, te
         current_stock=current_stock,
         avg_daily_usage=avg_usage,
     )
-    await update.message.reply_text(msg, reply_markup=inventory_menu_keyboard())
+    await update.message.reply_text(
+        f"{msg}\nID assigned: `{item_id}`" if ok else msg,
+        reply_markup=inventory_menu_keyboard(),
+        parse_mode="Markdown"
+    )
 
 
 async def handle_add_multiple(update: Update, context: ContextTypes.DEFAULT_TYPE, text: str):
-    """Handle multiple items input."""
+    """Handle multiple items input. ID is auto-generated."""
     lines = text.strip().split("\n")
     items_data = []
+    existing_ids = [it["item_id"] for it in get_all_items()]
+
     for line in lines:
+        line = line.strip()
+        if not line:
+            continue
         parts = [p.strip() for p in line.split("|")]
-        if len(parts) >= 3:
-            items_data.append({
-                "item_id": parts[0],
-                "item_name": parts[1],
-                "unit": parts[2],
-                "starting_stock": float(parts[3]) if len(parts) > 3 else 0,
-                "current_stock": float(parts[4]) if len(parts) > 4 else float(parts[3]) if len(parts) > 3 else 0,
-                "avg_daily_usage": float(parts[5]) if len(parts) > 5 else 0,
-            })
+        if len(parts) < 2:
+            continue
+
+        # Detect format: if first part has spaces or >6 chars, it's a name (no ID)
+        if " " in parts[0] or len(parts[0]) > 6:
+            # Simple format: name | unit | stock | avg_usage
+            item_name = parts[0]
+            unit = parts[1] if len(parts) > 1 else "pcs"
+            starting_stock = float(parts[2]) if len(parts) > 2 else 0
+            avg_usage = float(parts[3]) if len(parts) > 3 else 0
+            item_id = auto_item_id(item_name, existing_ids)
+            existing_ids.append(item_id)  # prevent duplicates within this batch
+        else:
+            # Full format: id | name | unit | stock | current | avg
+            item_id = parts[0]
+            item_name = parts[1] if len(parts) > 1 else ""
+            unit = parts[2] if len(parts) > 2 else "pcs"
+            starting_stock = float(parts[3]) if len(parts) > 3 else 0
+            avg_usage = float(parts[5]) if len(parts) > 5 else 0
+            existing_ids.append(item_id)
+
+        items_data.append({
+            "item_id": item_id,
+            "item_name": item_name,
+            "unit": unit,
+            "starting_stock": starting_stock,
+            "current_stock": starting_stock,
+            "avg_daily_usage": avg_usage,
+        })
 
     if items_data:
         from services.inventory_service import add_multiple_items
@@ -309,7 +369,8 @@ async def handle_add_multiple(update: Update, context: ContextTypes.DEFAULT_TYPE
     else:
         await update.message.reply_text(
             "No valid items found. Use format:\n"
-            "`item_id | name | unit | starting_stock | current_stock | avg_usage`",
+            "`Name | unit | stock | avg_usage`\n"
+            "Example:\n`Rice | kg | 100 | 40`\n`Sugar | kg | 50 | 20`",
             parse_mode="Markdown"
         )
 
