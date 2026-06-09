@@ -7,7 +7,7 @@ import csv
 import io
 from typing import Dict, Any, Optional
 from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup
-from telegram.ext import ContextTypes, ConversationTypes
+from telegram.ext import ContextTypes
 
 from app.config import config
 from services.inventory_service import (
