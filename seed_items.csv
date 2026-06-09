@@ -1,0 +1,7 @@
+item_name,unit,starting_stock,current_stock,average_daily_usage,location,category
+Rice,kg,200,200,40,Rack A,Grains
+Jeera,kg,5,5,0.5,Rack B,Spices
+Sugar,kg,50,50,8,Rack C,Grocery
+Oil,L,30,30,5,Store 1,Oils
+Ghee,kg,10,10,1,Rack D,Dairy
+Onion,kg,80,80,15,Store 2,Vegetables
