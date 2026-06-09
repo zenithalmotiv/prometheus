@@ -7,8 +7,8 @@ A Telegram-based inventory management system for Rajagiri canteen, designed for 
 - **Hybrid Interaction**: Buttons for daily workflow, commands for speed, AI for natural language
 - **Full Stock Management**: All movement types (used, purchased, damaged, transfers, adjustments)
 - **Smart Reordering**: 3-day reorder rule with low stock alerts
-- **Daily Reports**: Complete end-of-day transaction summaries
-- **Undo Support**: Safely reverse the last stock-affecting action
+- **Daily Reports**: Complete end-of-day transaction summaries with optional auto-send scheduler
+- **Undo Support**: Safely reverse the last stock-affecting action (restores stock and daily counters)
 - **Backup & Restore**: Database snapshots with safety backups
 - **Bulk Import/Export**: CSV and Excel support
 - **Secret-Word Access**: Simple, secure access control
@@ -30,6 +30,7 @@ cp .env.example .env
 # - TELEGRAM_BOT_TOKEN (from @BotFather)
 # - SECRET_WORD (for bot access)
 # - GEMINI_API_KEY (optional, for AI mode)
+# - DAILY_REPORT_CHAT_ID (optional, for auto daily report)
 ```
 
 ### 3. Run the Bot
@@ -49,6 +50,8 @@ The bot will start in polling mode and create the SQLite database automatically.
 | `GEMINI_API_KEY` | No | - | Google Gemini API key for AI mode |
 | `DATABASE_PATH` | No | `prometheus.db` | SQLite database file path |
 | `REORDER_DAYS` | No | `3` | Reorder threshold in days |
+| `DAILY_REPORT_CHAT_ID` | No | - | Telegram chat/group ID to send daily report to |
+| `DAILY_REPORT_TIME` | No | `20:30` | Time to send daily report (HH:MM, 24h IST) |
 | `ENVIRONMENT` | No | `development` | dev/prod environment |
 
 ## Usage
@@ -177,12 +180,23 @@ Upload a CSV file or paste CSV content with columns:
 
 Backups are stored in the `backups/` directory. Each restore creates a safety backup of the current state before overwriting.
 
+## Daily Auto-Report
+
+To enable automatic end-of-day reports, set `DAILY_REPORT_CHAT_ID` in your `.env`:
+
+```env
+DAILY_REPORT_CHAT_ID=123456789
+DAILY_REPORT_TIME=20:30
+```
+
+Get your chat ID by messaging [@userinfobot](https://t.me/userinfobot) on Telegram. For group chats, add the bot to the group and use the group's chat ID (starts with `-`).
+
 ## Architecture
 
 ```
-prometheus_v1/
+prometheus/
 ├── app/              # Configuration
-├── bot.py            # Main entry point
+├── bot.py            # Main entry point + scheduler
 ├── db/               # Database layer (SQLite)
 ├── handlers/         # Telegram handlers (commands, callbacks, messages)
 ├── models/           # Data models
