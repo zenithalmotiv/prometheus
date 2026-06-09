@@ -15,11 +15,13 @@ from services.inventory_service import (
     find_item, get_all_items, check_stock, get_items_by_section,
     get_all_purposes, create_purpose,
     parse_csv_import,
+    change_secret_word,
+    do_restore, get_backups,
 )
 from services.ai_service import ai_service
 from handlers.callback_handler import (
     get_session, main_menu_keyboard, inventory_menu_keyboard,
-    item_select_keyboard, purposes_menu_keyboard,
+    item_select_keyboard, purposes_menu_keyboard, admin_menu_keyboard,
 )
 
 
@@ -81,6 +83,9 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
     elif awaiting == "ai_confirm":
         await handle_ai_confirmation(update, context, text)
 
+    elif awaiting == "restore_select":
+        await handle_restore_select(update, context, text)
+
     else:
         # No pending action - try AI mode or show help
         await try_ai_mode(update, context, text)
@@ -128,13 +133,11 @@ async def handle_movement_item(update: Update, context: ContextTypes.DEFAULT_TYP
     item = find_item(text)
     if not item:
         # Show matching items
-        matches = get_items_by_section(text) if text.lower() in ["rajagiri main", "woods", "garden cafe", "bba canteen", "bba tea counter"] else None
-        if not matches:
-            matches = []
-            all_items = get_all_items()
-            for it in all_items:
-                if text.lower() in it["item_name"].lower() or text.lower() in it["item_id"].lower():
-                    matches.append(it)
+        matches = []
+        all_items = get_all_items()
+        for it in all_items:
+            if text.lower() in it["item_name"].lower() or text.lower() in it["item_id"].lower():
+                matches.append(it)
 
         if matches:
             kb = item_select_keyboard(matches[:15], "sel_item")
@@ -419,6 +422,31 @@ async def handle_adjustment(update: Update, context: ContextTypes.DEFAULT_TYPE, 
 
     ok, msg, tx_id = adjust_stock(item["item_id"], new_stock, str(update.effective_user.id))
     await update.message.reply_text(msg, reply_markup=main_menu_keyboard())
+
+
+async def handle_restore_select(update: Update, context: ContextTypes.DEFAULT_TYPE, text: str):
+    """Handle restore backup selection by number or path."""
+    backups = get_backups()
+    backup_path = None
+
+    # Try as a number (e.g. user replied "1")
+    try:
+        idx = int(text.strip()) - 1
+        if 0 <= idx < len(backups):
+            backup_path = backups[idx]["filename"]
+    except ValueError:
+        # Treat as a direct path
+        backup_path = text.strip()
+
+    if not backup_path:
+        await update.message.reply_text(
+            "Invalid selection. Send a number from the list or the full backup path."
+        )
+        context.user_data["awaiting"] = "restore_select"
+        return
+
+    ok, msg = do_restore(backup_path)
+    await update.message.reply_text(msg, reply_markup=admin_menu_keyboard())
 
 
 async def handle_ai_confirmation(update: Update, context: ContextTypes.DEFAULT_TYPE, text: str):

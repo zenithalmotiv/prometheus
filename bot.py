@@ -6,6 +6,9 @@ Main entry point.
 import logging
 import sys
 import os
+from datetime import time as dtime
+
+import pytz
 
 # Add project root to path
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
@@ -106,6 +109,87 @@ def setup_handlers(application: Application):
     application.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_message))
 
 
+async def send_daily_report(context: ContextTypes.DEFAULT_TYPE):
+    """Scheduled job: send daily report to DAILY_REPORT_CHAT_ID."""
+    from services.inventory_service import generate_daily_report, get_low_stock
+    from db.database import get_daily_report
+
+    chat_id = config.DAILY_REPORT_CHAT_ID
+    if not chat_id:
+        return
+
+    report = generate_daily_report()
+    lines = [f"*\U0001F4CA Daily Report - {report['date']}*\n"]
+
+    if report["used_items"]:
+        lines.append("*Used:*")
+        for t in report["used_items"]:
+            lines.append(f"- {t['item_name']}: {t['quantity']} {t['unit']} ({t['purpose']})")
+        lines.append("")
+
+    if report["purchased_items"]:
+        lines.append("*Purchased:*")
+        for t in report["purchased_items"]:
+            lines.append(f"- {t['item_name']}: {t['quantity']} {t['unit']}")
+        lines.append("")
+
+    if report["damaged_items"]:
+        lines.append("*Damaged:*")
+        for t in report["damaged_items"]:
+            lines.append(f"- {t['item_name']}: {t['quantity']} {t['unit']}")
+        lines.append("")
+
+    if report["transfers"]:
+        lines.append("*Transfers:*")
+        for t in report["transfers"]:
+            lines.append(f"- {t['item_name']}: {t['quantity']} {t['unit']} \u2192 {t['action']}")
+        lines.append("")
+
+    low_stock = report.get("low_stock", [])
+    if low_stock:
+        lines.append("\u26A0\uFE0F *Low Stock Alert:*")
+        for item in low_stock:
+            lines.append(f"- {item['item_name']}: {item['current_stock']} {item['unit']}")
+        lines.append("")
+
+    lines.append(f"Total transactions: {report['total_transactions']}")
+
+    msg = "\n".join(lines)
+    if len(msg) > 4000:
+        msg = msg[:3990] + "...\n(truncated)"
+
+    await context.bot.send_message(
+        chat_id=chat_id,
+        text=msg,
+        parse_mode="Markdown"
+    )
+
+
+def setup_scheduler(application: Application):
+    """Set up scheduled jobs."""
+    if not config.daily_report_enabled:
+        logger.info("Daily report scheduler disabled (DAILY_REPORT_CHAT_ID not set).")
+        return
+
+    try:
+        time_parts = config.DAILY_REPORT_TIME.split(":")
+        hour = int(time_parts[0])
+        minute = int(time_parts[1])
+    except (ValueError, IndexError):
+        logger.warning(f"Invalid DAILY_REPORT_TIME '{config.DAILY_REPORT_TIME}', using 20:30.")
+        hour, minute = 20, 30
+
+    ist = pytz.timezone("Asia/Kolkata")
+    report_time = dtime(hour=hour, minute=minute, tzinfo=ist)
+
+    application.job_queue.run_daily(
+        send_daily_report,
+        time=report_time,
+        name="daily_report",
+    )
+    logger.info(f"Daily report scheduled at {hour:02d}:{minute:02d} IST -> chat {config.DAILY_REPORT_CHAT_ID}")
+
+
 def main():
     """Start the bot."""
     # Validate config
@@ -127,6 +211,9 @@ def main():
 
     # Register handlers
     setup_handlers(application)
+
+    # Set up scheduler
+    setup_scheduler(application)
 
     # Start polling
     logger.info("Bot is running (polling mode). Press Ctrl+C to stop.")

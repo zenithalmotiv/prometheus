@@ -37,6 +37,10 @@ class Config:
     WEBHOOK_URL: str = os.getenv("WEBHOOK_URL", "")
     WEBHOOK_PORT: int = int(os.getenv("WEBHOOK_PORT", "8443"))
 
+    # Daily Report Scheduler
+    DAILY_REPORT_CHAT_ID: str = os.getenv("DAILY_REPORT_CHAT_ID", "")
+    DAILY_REPORT_TIME: str = os.getenv("DAILY_REPORT_TIME", "20:30")  # HH:MM 24h IST
+
     # Environment
     ENVIRONMENT: str = os.getenv("ENVIRONMENT", "development")
 
@@ -47,6 +51,10 @@ class Config:
     @property
     def gemini_enabled(self) -> bool:
         return bool(self.GEMINI_API_KEY)
+
+    @property
+    def daily_report_enabled(self) -> bool:
+        return bool(self.DAILY_REPORT_CHAT_ID)
 
     def validate(self) -> list[str]:
         """Validate required configuration. Returns list of missing fields."""
