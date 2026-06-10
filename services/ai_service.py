@@ -1,7 +1,7 @@
 """
 AI Service for Prometheus.
 Handles natural language understanding using Gemini API.
-Converts conversational input into structured inventory actions.
+Uses direct httpx REST calls - no google-generativeai package needed.
 """
 
 import json
@@ -9,17 +9,17 @@ import logging
 import re
 from typing import Optional, Tuple
 
+import httpx
+
 from app.config import config
 from models import ParsedAction
 
 logger = logging.getLogger(__name__)
 
-try:
-    import google.generativeai as genai
-    GEMINI_AVAILABLE = True
-except ImportError:
-    GEMINI_AVAILABLE = False
-    logger.warning("google-generativeai not installed. Gemini disabled.")
+GEMINI_URL = (
+    "https://generativelanguage.googleapis.com/v1beta/models/"
+    "gemini-1.5-flash:generateContent"
+)
 
 # ---------------------------------------------------------------------------
 # Fallback rule-based keyword map
@@ -71,25 +71,40 @@ NO_QTY_ACTIONS = {
 
 ADD_ITEM_TRIGGERS = ["add item", "add new item", "new item", "create item", "add a new", "add to inventory"]
 
+ACTION_MAP = {
+    "wipro_in":        "wipro in",
+    "wipro_out":       "wipro out",
+    "rajagiri_main":   "rajagiri main",
+    "garden_cafe":     "garden cafe",
+    "bba_canteen":     "bba canteen",
+    "bba_tea_counter": "bba tea counter",
+    "check_stock":     "check",
+    "low_stock":       "low_stock",
+    "order_list":      "order_list",
+    "daily_report":    "daily_report",
+    "list_all":        "list",
+    "zero_stock":      "zero_stock",
+    "export_csv":      "export_csv",
+    "export_excel":    "export_excel",
+    "add_item":        "add_item",
+    "delete_item":     "delete_item",
+    "set_avg":         "set_avg",
+    "set_unit":        "set_unit",
+    "stock_adjust":    "stock_adjust",
+    "undo":            "undo",
+    "backup":          "backup",
+    "reset_day":       "reset_day",
+}
+
 
 class AIService:
 
     def __init__(self):
-        self.enabled = config.gemini_enabled and GEMINI_AVAILABLE
-        self.model = None
+        self.enabled = bool(config.GEMINI_API_KEY)
         if self.enabled:
-            try:
-                genai.configure(api_key=config.GEMINI_API_KEY)
-                self.model = genai.GenerativeModel("gemini-1.5-flash")
-                logger.info("Gemini AI enabled and model loaded.")
-            except Exception as e:
-                logger.error(f"Failed to initialise Gemini: {e}")
-                self.enabled = False
+            logger.info("Gemini AI enabled (httpx REST mode).")
         else:
-            if not config.GEMINI_API_KEY:
-                logger.warning("GEMINI_API_KEY not set in .env — running in fallback (rule-based) mode only.")
-            elif not GEMINI_AVAILABLE:
-                logger.warning("google-generativeai package not installed — running in fallback mode.")
+            logger.warning("GEMINI_API_KEY not set in .env — running in fallback (rule-based) mode only.")
 
     def _build_system_prompt(self) -> str:
         return """You are Prometheus, a canteen inventory management assistant.
@@ -136,10 +151,6 @@ RULES:
 - For check_stock: item_name is required
 - If uncertain, set confidence below 0.7 and explain in note
 - Multiple DIFFERENT items = return array of actions
-- "give me the excel", "send excel", "export excel" -> export_excel
-- "give me the list", "show all items", "item list" -> list_all
-- "daily report", "today report" -> daily_report
-- "low stock", "running low" -> low_stock
 - NEVER return an empty actions array. Always parse something.
 
 Respond ONLY with valid JSON (no markdown, no explanation):
@@ -160,21 +171,46 @@ Respond ONLY with valid JSON (no markdown, no explanation):
 }
 """
 
-    def parse_with_gemini(self, text: str) -> Tuple[bool, list]:
-        if not self.enabled or not self.model:
+    async def parse_with_gemini(self, text: str) -> Tuple[bool, list]:
+        """Call Gemini REST API directly using httpx (no SDK needed)."""
+        if not self.enabled:
             return False, []
 
+        payload = {
+            "contents": [
+                {
+                    "parts": [
+                        {"text": self._build_system_prompt() + f"\n\nUser request: {text}"}
+                    ]
+                }
+            ],
+            "generationConfig": {
+                "temperature": 0.1,
+                "maxOutputTokens": 2048,
+            },
+        }
+
         try:
-            logger.info(f"Sending to Gemini: {text!r}")
-            prompt = self._build_system_prompt()
-            response = self.model.generate_content(
-                f"{prompt}\n\nUser request: {text}",
-                generation_config=genai.types.GenerationConfig(
-                    temperature=0.1,
-                    max_output_tokens=2048,
+            logger.info(f"Sending to Gemini (httpx): {text!r}")
+            async with httpx.AsyncClient(timeout=15.0) as client:
+                resp = await client.post(
+                    GEMINI_URL,
+                    params={"key": config.GEMINI_API_KEY},
+                    json=payload,
                 )
+
+            if resp.status_code != 200:
+                logger.error(f"Gemini HTTP {resp.status_code}: {resp.text[:300]}")
+                return False, []
+
+            data = resp.json()
+            response_text = (
+                data.get("candidates", [{}])[0]
+                    .get("content", {})
+                    .get("parts", [{}])[0]
+                    .get("text", "")
+                    .strip()
             )
-            response_text = response.text.strip()
             logger.info(f"Gemini response: {response_text[:300]}")
 
             if "```json" in response_text:
@@ -182,38 +218,13 @@ Respond ONLY with valid JSON (no markdown, no explanation):
             elif "```" in response_text:
                 response_text = response_text.split("```")[1].split("```")[0].strip()
 
-            data = json.loads(response_text)
-            actions = data.get("actions", [])
-
-            action_map = {
-                "wipro_in":        "wipro in",
-                "wipro_out":       "wipro out",
-                "rajagiri_main":   "rajagiri main",
-                "garden_cafe":     "garden cafe",
-                "bba_canteen":     "bba canteen",
-                "bba_tea_counter": "bba tea counter",
-                "check_stock":     "check",
-                "low_stock":       "low_stock",
-                "order_list":      "order_list",
-                "daily_report":    "daily_report",
-                "list_all":        "list",
-                "zero_stock":      "zero_stock",
-                "export_csv":      "export_csv",
-                "export_excel":    "export_excel",
-                "add_item":        "add_item",
-                "delete_item":     "delete_item",
-                "set_avg":         "set_avg",
-                "set_unit":        "set_unit",
-                "stock_adjust":    "stock_adjust",
-                "undo":            "undo",
-                "backup":          "backup",
-                "reset_day":       "reset_day",
-            }
+            parsed = json.loads(response_text)
+            actions_raw = parsed.get("actions", [])
 
             parsed_actions = []
-            for a in actions:
+            for a in actions_raw:
                 raw_action = a.get("action", "").lower().replace(" ", "_").replace("-", "_")
-                action = action_map.get(raw_action, raw_action)
+                action = ACTION_MAP.get(raw_action, raw_action)
                 parsed_actions.append(ParsedAction(
                     action=action,
                     item_name=a.get("item_name", ""),
@@ -252,6 +263,19 @@ Respond ONLY with valid JSON (no markdown, no explanation):
 
         return len(actions) > 0, actions
 
+    async def parse(self, text: str) -> Tuple[bool, list]:
+        """Try Gemini first, fall back to rule-based if it fails."""
+        if self.enabled:
+            success, actions = await self.parse_with_gemini(text)
+            if success and actions:
+                return True, actions
+            logger.warning("Gemini returned no actions, falling back to rule-based parser.")
+        return self.parse_with_fallback(text)
+
+    # ------------------------------------------------------------------
+    # Rule-based parser helpers (unchanged)
+    # ------------------------------------------------------------------
+
     def _parse_single_action(self, text: str, full_text: str = "") -> Optional[ParsedAction]:
         text_lower = text.lower().strip()
         src = full_text or text_lower
@@ -273,17 +297,15 @@ Respond ONLY with valid JSON (no markdown, no explanation):
             if detected_action == "check":
                 item_name = self._extract_item_name_simple(src, detected_action)
             return ParsedAction(
-                action=detected_action,
-                item_name=item_name,
+                action=detected_action, item_name=item_name,
                 quantity=0, unit="", purpose="", destination="",
                 raw_input=text, confidence=0.75,
             )
 
         if detected_action == "delete_item":
-            item_name = self._extract_item_name_for_delete(src)
             return ParsedAction(
                 action="delete_item",
-                item_name=item_name,
+                item_name=self._extract_item_name_for_delete(src),
                 quantity=0, unit="", purpose="", destination="",
                 raw_input=text, confidence=0.85,
             )
@@ -292,41 +314,33 @@ Respond ONLY with valid JSON (no markdown, no explanation):
             return self._parse_add_item(src, text)
 
         if detected_action == "set_avg":
-            qty = self._extract_quantity(src)
-            item = self._extract_item_name_simple(src, detected_action)
             return ParsedAction(
                 action="set_avg",
-                item_name=item, quantity=qty, unit="",
-                purpose="", destination="",
-                raw_input=text, confidence=0.75,
+                item_name=self._extract_item_name_simple(src, detected_action),
+                quantity=self._extract_quantity(src), unit="",
+                purpose="", destination="", raw_input=text, confidence=0.75,
             )
 
         if detected_action == "set_unit":
-            unit = self._extract_unit(src)
-            item = self._extract_item_name_simple(src, detected_action)
             return ParsedAction(
                 action="set_unit",
-                item_name=item, quantity=0, unit=unit,
-                purpose="", destination="",
-                raw_input=text, confidence=0.75,
+                item_name=self._extract_item_name_simple(src, detected_action),
+                quantity=0, unit=self._extract_unit(src),
+                purpose="", destination="", raw_input=text, confidence=0.75,
             )
 
         if detected_action == "stock_adjust":
-            qty = self._extract_quantity(src)
-            item = self._extract_item_name_simple(src, detected_action)
             return ParsedAction(
                 action="stock_adjust",
-                item_name=item, quantity=qty, unit="",
-                purpose="", destination="",
-                raw_input=text, confidence=0.75,
+                item_name=self._extract_item_name_simple(src, detected_action),
+                quantity=self._extract_quantity(src), unit="",
+                purpose="", destination="", raw_input=text, confidence=0.75,
             )
 
         if detected_action in ("undo", "backup", "reset_day"):
             return ParsedAction(
-                action=detected_action,
-                item_name="", quantity=0, unit="",
-                purpose="", destination="",
-                raw_input=text, confidence=0.8,
+                action=detected_action, item_name="", quantity=0, unit="",
+                purpose="", destination="", raw_input=text, confidence=0.8,
             )
 
         quantity = self._extract_quantity(src)
@@ -347,34 +361,33 @@ Respond ONLY with valid JSON (no markdown, no explanation):
             return None
 
         return ParsedAction(
-            action=detected_action,
-            item_name=item_name, quantity=quantity, unit=unit,
-            purpose=purpose, destination=destination,
-            raw_input=text, confidence=0.7,
+            action=detected_action, item_name=item_name, quantity=quantity, unit=unit,
+            purpose=purpose, destination=destination, raw_input=text, confidence=0.7,
         )
 
     def _parse_add_item(self, text: str, raw: str) -> Optional[ParsedAction]:
         unit = self._extract_unit(text)
-
         starting_stock = 0.0
         avg_daily_usage = 0.0
 
         stock_match = re.search(
-            r'(?:starting|current|stock|with)\s+(?:stock\s+)?(?:of\s+)?(\d+\.?\d*)\s*(?:kg|g|l|ml|pcs|piece|pieces|packet|packets|box|boxes|bottle|bottles|tin|tins|can|cans|gram|grams|litre|liter|litres)?',
+            r'(?:starting|current|stock|with)\s+(?:stock\s+)?(?:of\s+)?(\d+\.?\d*)'
+            r'\s*(?:kg|g|l|ml|pcs|piece|pieces|packet|packets|box|boxes|bottle|bottles|tin|tins|can|cans|gram|grams|litre|liter|litres)?',
             text
         )
         stock_match2 = re.search(
-            r'(\d+\.?\d*)\s*(?:kg|g|l|ml|pcs|piece|packet|box|bottle|tin|can|gram|grams|litre|liter)?\s*(?:in\s+)?(?:starting|current)',
+            r'(\d+\.?\d*)\s*(?:kg|g|l|ml|pcs|piece|packet|box|bottle|tin|can|gram|grams|litre|liter)?'
+            r'\s*(?:in\s+)?(?:starting|current)',
             text
         )
-
         if stock_match:
             starting_stock = float(stock_match.group(1))
         elif stock_match2:
             starting_stock = float(stock_match2.group(1))
 
         avg_match = re.search(
-            r'(?:average|avg|average use|avg use|average usage|avg usage|use of|usage of)\s+(?:of\s+)?(\d+\.?\d*)\s*(?:kg|g|l|ml|pcs|piece|pieces|packet|packets|box|boxes|bottle|bottles|tin|tins|can|cans|gram|grams|litre|liter|litres)?',
+            r'(?:average|avg|average use|avg use|average usage|avg usage|use of|usage of)\s+(?:of\s+)?'
+            r'(\d+\.?\d*)\s*(?:kg|g|l|ml|pcs|piece|pieces|packet|packets|box|boxes|bottle|bottles|tin|tins|can|cans|gram|grams|litre|liter|litres)?',
             text
         )
         if avg_match:
@@ -404,14 +417,8 @@ Respond ONLY with valid JSON (no markdown, no explanation):
             return None
 
         return ParsedAction(
-            action="add_item",
-            item_name=name,
-            quantity=starting_stock,
-            unit=unit,
-            purpose="",
-            destination="",
-            raw_input=raw,
-            confidence=0.80,
+            action="add_item", item_name=name, quantity=starting_stock, unit=unit,
+            purpose="", destination="", raw_input=raw, confidence=0.80,
             extra={"avg_daily_usage": avg_daily_usage},
         )
 
@@ -439,9 +446,7 @@ Respond ONLY with valid JSON (no markdown, no explanation):
         if matches:
             return float(matches[0])
         matches = re.findall(r'(\d+\.?\d*)', text)
-        if matches:
-            return float(matches[0])
-        return 0
+        return float(matches[0]) if matches else 0
 
     def _extract_unit(self, text: str) -> str:
         for unit in UNITS:
@@ -486,16 +491,7 @@ Respond ONLY with valid JSON (no markdown, no explanation):
                     return re.sub(r'[.,;!?].*', '', purpose).strip()
         return ""
 
-    def parse(self, text: str) -> Tuple[bool, list]:
-        if self.enabled:
-            success, actions = self.parse_with_gemini(text)
-            if success and actions:
-                return True, actions
-            logger.warning("Gemini returned no actions, falling back to rule-based parser.")
-        return self.parse_with_fallback(text)
-
     def format_for_confirmation(self, actions: list) -> str:
-        """Build plain-text confirmation message (no Markdown parse_mode)."""
         lines = ["Please confirm these actions:\n"]
         for i, action in enumerate(actions, 1):
             a = action.action
