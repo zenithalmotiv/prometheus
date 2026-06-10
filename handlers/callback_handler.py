@@ -310,7 +310,7 @@ async def handle_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
         return
 
     # Admin actions
-    elif data.startswith("adm_"):
+    elif data.startswith("adm_") or data in ("delall_confirm", "reset_confirm") or data.startswith("restore_sel_") or data.startswith("restore_conf_"):
         await handle_admin_callback(update, context, data)
         return
 
@@ -324,6 +324,16 @@ async def handle_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await query.edit_message_text(
             "Action cancelled.",
             reply_markup=main_menu_keyboard()
+        )
+        return
+
+    # FIX: del_confirm_ must be checked BEFORE del_ to prevent infinite loop
+    elif data.startswith("del_confirm_"):
+        item_id = data.replace("del_confirm_", "")
+        ok, msg = delete_single_item(item_id)
+        await query.edit_message_text(
+            msg,
+            reply_markup=inventory_menu_keyboard()
         )
         return
 
@@ -528,8 +538,11 @@ async def handle_inventory_callback(update: Update, context: ContextTypes.DEFAUL
     if action == "add":
         await query.edit_message_text(
             "*Add Item* - Send details in format:\n"
-            "`<item_id> | <name> | <unit> | <starting_stock> | <current_stock> | <avg_usage>`\n"
-            "Example: `R001 | Rice | kg | 100 | 100 | 40`",
+            "`<name> | <unit> | <starting_stock> | <avg_usage>`\n"
+            "Example: `Rice | kg | 150 | 40`\n\n"
+            "Or with custom ID:\n"
+            "`<ID> | <name> | <unit> | <stock> | <current> | <avg>`\n"
+            "Example: `R001 | Rice | kg | 150 | 150 | 40`",
             parse_mode="Markdown"
         )
         context.user_data["awaiting"] = "add_item"
@@ -537,10 +550,10 @@ async def handle_inventory_callback(update: Update, context: ContextTypes.DEFAUL
     elif action == "add_multi":
         await query.edit_message_text(
             "*Add Multiple Items* - Send one per line:\n"
-            "`<item_id> | <name> | <unit> | <starting_stock> | <current_stock> | <avg_usage>`\n"
+            "`<name> | <unit> | <starting_stock> | <avg_usage>`\n"
             "Example:\n"
-            "`R001 | Rice | kg | 100 | 100 | 40`\n"
-            "`S001 | Sugar | kg | 50 | 50 | 20`",
+            "`Rice | kg | 150 | 40`\n"
+            "`Sugar | kg | 50 | 20`",
             parse_mode="Markdown"
         )
         context.user_data["awaiting"] = "add_multi"
@@ -557,7 +570,7 @@ async def handle_inventory_callback(update: Update, context: ContextTypes.DEFAUL
     elif action == "edit":
         items = get_all_items()
         if items:
-            kb = item_select_keyboard(items[:20], "edit")  # Limit to 20 for keyboard size
+            kb = item_select_keyboard(items[:20], "edit")
             await query.edit_message_text(
                 "Select item to edit:",
                 reply_markup=kb
@@ -624,10 +637,13 @@ async def handle_item_action_callback(update: Update, context: ContextTypes.DEFA
         context.user_data["awaiting"] = "edit_item"
 
     elif data.startswith("del_"):
-        item_id = data.replace("del_", "")
+        # FIX: strip prefix correctly and show one clean confirmation
+        item_id = data[len("del_"):]
         session["temp_data"]["delete_item_id"] = item_id
+        item = find_item(item_id)
+        item_name = item["item_name"] if item else item_id
         await query.edit_message_text(
-            f"Delete item `{item_id}`?",
+            f"Delete *{item_name}*?\nThis cannot be undone.",
             reply_markup=yes_no_keyboard(f"del_confirm_{item_id}", "menu_inventory"),
             parse_mode="Markdown"
         )
@@ -651,14 +667,6 @@ async def handle_item_action_callback(update: Update, context: ContextTypes.DEFA
             parse_mode="Markdown"
         )
         context.user_data["awaiting"] = "set_unit"
-
-    elif data.startswith("del_confirm_"):
-        item_id = data.replace("del_confirm_", "")
-        ok, msg = delete_single_item(item_id)
-        await query.edit_message_text(
-            msg,
-            reply_markup=inventory_menu_keyboard()
-        )
 
 
 async def handle_purpose_callback(update: Update, context: ContextTypes.DEFAULT_TYPE, data: str):
@@ -754,7 +762,7 @@ async def handle_admin_callback(update: Update, context: ContextTypes.DEFAULT_TY
         backups = get_backups()
         if backups:
             kb = []
-            for b in backups[:10]:  # Show last 10
+            for b in backups[:10]:
                 kb.append([InlineKeyboardButton(
                     f"{b['filename'][:40]}...",
                     callback_data=f"restore_sel_{b['filename']}"

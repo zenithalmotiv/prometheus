@@ -28,7 +28,6 @@ from handlers.callback_handler import (
 
 def auto_item_id(item_name: str, existing_ids: list) -> str:
     """Generate a unique item ID from the item name."""
-    # Take first 3 letters uppercased
     base = re.sub(r'[^A-Za-z]', '', item_name).upper()[:3] or "ITM"
     counter = 1
     candidate = f"{base}{counter:03d}"
@@ -38,13 +37,20 @@ def auto_item_id(item_name: str, existing_ids: list) -> str:
     return candidate
 
 
+def _looks_like_item_id(s: str) -> bool:
+    """Return True if the string looks like a custom item ID (e.g. R001, ITM1).
+    An ID has no spaces and matches the pattern: letters followed by digits.
+    A plain word like 'Rice' or 'Sugar' is NOT an ID.
+    """
+    return bool(re.fullmatch(r'[A-Za-z]{1,5}\d+', s.strip()))
+
+
 async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
     """Main message handler - routes to specific handlers based on state."""
     user_id = update.effective_user.id
     text = update.message.text.strip()
     session = get_session(user_id)
 
-    # Check if bot is locked (except for unlock command)
     if session.get("locked", True):
         await update.message.reply_text(
             "Bot is locked. Send `/unlock <secret>` to access."
@@ -53,7 +59,6 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
     awaiting = context.user_data.get("awaiting", "")
 
-    # Route to specific handler based on what we're waiting for
     if awaiting == "movement_item":
         await handle_movement_item(update, context, text)
 
@@ -100,10 +105,8 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await handle_restore_select(update, context, text)
 
     else:
-        # No pending action - try AI mode or show help
         await try_ai_mode(update, context, text)
 
-    # Clear awaiting state unless we're in a multi-step flow
     if awaiting not in ("movement_qty", "custom_purpose"):
         context.user_data["awaiting"] = ""
 
@@ -142,10 +145,8 @@ async def handle_movement_item(update: Update, context: ContextTypes.DEFAULT_TYP
     user_id = update.effective_user.id
     session = get_session(user_id)
 
-    # Try to find the item
     item = find_item(text)
     if not item:
-        # Show matching items
         matches = []
         all_items = get_all_items()
         for it in all_items:
@@ -268,40 +269,43 @@ async def handle_check_stock(update: Update, context: ContextTypes.DEFAULT_TYPE,
 
 
 async def handle_add_item(update: Update, context: ContextTypes.DEFAULT_TYPE, text: str):
-    """Handle add item input. ID is auto-generated if not provided."""
-    parts = [p.strip() for p in text.split("|")]
+    """Handle add single item input.
 
-    # Simple format: name | unit | stock | avg_usage (no ID)
-    # Full format:   id | name | unit | stock | current | avg
-    # Detect by checking if first part looks like a name (not an ID code)
+    Accepts two formats:
+      Simple (auto-ID): Name | unit | stock | avg_usage
+      Full  (custom ID): ID | Name | unit | stock | current | avg_usage
+
+    Detection: if the first part looks like an item ID (letters+digits, e.g. R001)
+    we use full format. Otherwise we treat it as a name and auto-generate the ID.
+    """
+    parts = [p.strip() for p in text.split("|")]
     existing_ids = [it["item_id"] for it in get_all_items()]
 
-    if len(parts) >= 2:
-        # If first part has spaces or is longer than 6 chars, treat as name
-        if " " in parts[0] or len(parts[0]) > 6:
-            # Simple format: name | unit | stock | avg_usage
-            item_name = parts[0]
-            unit = parts[1] if len(parts) > 1 else "pcs"
-            starting_stock = float(parts[2]) if len(parts) > 2 else 0
-            current_stock = starting_stock
-            avg_usage = float(parts[3]) if len(parts) > 3 else 0
-            item_id = auto_item_id(item_name, existing_ids)
-        else:
-            # Full format with ID
-            item_id = parts[0]
-            item_name = parts[1] if len(parts) > 1 else ""
-            unit = parts[2] if len(parts) > 2 else "pcs"
-            starting_stock = float(parts[3]) if len(parts) > 3 else 0
-            current_stock = float(parts[4]) if len(parts) > 4 else starting_stock
-            avg_usage = float(parts[5]) if len(parts) > 5 else 0
-    else:
+    if len(parts) < 2:
         await update.message.reply_text(
             "Invalid format. Use:\n"
             "`Name | unit | stock | avg_usage`\n"
-            "Example: `Rice | kg | 100 | 40`",
+            "Example: `Rice | kg | 150 | 40`",
             parse_mode="Markdown"
         )
         return
+
+    if _looks_like_item_id(parts[0]) and len(parts) >= 3:
+        # Full format: ID | name | unit | stock | current | avg
+        item_id = parts[0]
+        item_name = parts[1]
+        unit = parts[2] if len(parts) > 2 else "pcs"
+        starting_stock = float(parts[3]) if len(parts) > 3 else 0
+        current_stock = float(parts[4]) if len(parts) > 4 else starting_stock
+        avg_usage = float(parts[5]) if len(parts) > 5 else 0
+    else:
+        # Simple format: name | unit | stock | avg_usage
+        item_name = parts[0]
+        unit = parts[1] if len(parts) > 1 else "pcs"
+        starting_stock = float(parts[2]) if len(parts) > 2 else 0
+        current_stock = starting_stock
+        avg_usage = float(parts[3]) if len(parts) > 3 else 0
+        item_id = auto_item_id(item_name, existing_ids)
 
     ok, msg = add_single_item(
         item_id=item_id,
@@ -319,7 +323,7 @@ async def handle_add_item(update: Update, context: ContextTypes.DEFAULT_TYPE, te
 
 
 async def handle_add_multiple(update: Update, context: ContextTypes.DEFAULT_TYPE, text: str):
-    """Handle multiple items input. ID is auto-generated."""
+    """Handle multiple items input. ID is auto-generated unless a proper ID is given."""
     lines = text.strip().split("\n")
     items_data = []
     existing_ids = [it["item_id"] for it in get_all_items()]
@@ -332,22 +336,21 @@ async def handle_add_multiple(update: Update, context: ContextTypes.DEFAULT_TYPE
         if len(parts) < 2:
             continue
 
-        # Detect format: if first part has spaces or >6 chars, it's a name (no ID)
-        if " " in parts[0] or len(parts[0]) > 6:
+        if _looks_like_item_id(parts[0]) and len(parts) >= 3:
+            # Full format: id | name | unit | stock | current | avg
+            item_id = parts[0]
+            item_name = parts[1]
+            unit = parts[2] if len(parts) > 2 else "pcs"
+            starting_stock = float(parts[3]) if len(parts) > 3 else 0
+            avg_usage = float(parts[5]) if len(parts) > 5 else 0
+            existing_ids.append(item_id)
+        else:
             # Simple format: name | unit | stock | avg_usage
             item_name = parts[0]
             unit = parts[1] if len(parts) > 1 else "pcs"
             starting_stock = float(parts[2]) if len(parts) > 2 else 0
             avg_usage = float(parts[3]) if len(parts) > 3 else 0
             item_id = auto_item_id(item_name, existing_ids)
-            existing_ids.append(item_id)  # prevent duplicates within this batch
-        else:
-            # Full format: id | name | unit | stock | current | avg
-            item_id = parts[0]
-            item_name = parts[1] if len(parts) > 1 else ""
-            unit = parts[2] if len(parts) > 2 else "pcs"
-            starting_stock = float(parts[3]) if len(parts) > 3 else 0
-            avg_usage = float(parts[5]) if len(parts) > 5 else 0
             existing_ids.append(item_id)
 
         items_data.append({
@@ -370,7 +373,7 @@ async def handle_add_multiple(update: Update, context: ContextTypes.DEFAULT_TYPE
         await update.message.reply_text(
             "No valid items found. Use format:\n"
             "`Name | unit | stock | avg_usage`\n"
-            "Example:\n`Rice | kg | 100 | 40`\n`Sugar | kg | 50 | 20`",
+            "Example:\n`Rice | kg | 150 | 40`\n`Sugar | kg | 50 | 20`",
             parse_mode="Markdown"
         )
 
@@ -394,7 +397,6 @@ async def handle_edit_item(update: Update, context: ContextTypes.DEFAULT_TYPE, t
         await update.message.reply_text("Error: No item selected.", reply_markup=inventory_menu_keyboard())
         return
 
-    # Check if it's a key:value format
     if ":" in text:
         key, value = text.split(":", 1)
         key = key.strip().lower()
@@ -409,7 +411,6 @@ async def handle_edit_item(update: Update, context: ContextTypes.DEFAULT_TYPE, t
         else:
             ok, msg = False, f"Unknown field: {key}"
     else:
-        # Pipe-separated format: name | location | category
         parts = [p.strip() for p in text.split("|")]
         name = parts[0] if len(parts) > 0 else None
         location = parts[1] if len(parts) > 1 else None
@@ -490,13 +491,11 @@ async def handle_restore_select(update: Update, context: ContextTypes.DEFAULT_TY
     backups = get_backups()
     backup_path = None
 
-    # Try as a number (e.g. user replied "1")
     try:
         idx = int(text.strip()) - 1
         if 0 <= idx < len(backups):
             backup_path = backups[idx]["filename"]
     except ValueError:
-        # Treat as a direct path
         backup_path = text.strip()
 
     if not backup_path:
@@ -566,15 +565,12 @@ async def try_ai_mode(update: Update, context: ContextTypes.DEFAULT_TYPE, text: 
     user_id = update.effective_user.id
     session = get_session(user_id)
 
-    # Try AI parsing
     success, actions = ai_service.parse(text)
 
     if success and actions:
-        # Check if any are stock-changing actions that need confirmation
         stock_actions = [a for a in actions if a.action not in ["check", "low stock", "list"]]
 
         if stock_actions:
-            # Store pending actions and ask for confirmation
             session["pending_actions"] = actions
             confirmation_msg = ai_service.format_for_confirmation(actions)
 
@@ -590,7 +586,6 @@ async def try_ai_mode(update: Update, context: ContextTypes.DEFAULT_TYPE, text: 
             )
             context.user_data["awaiting"] = "ai_confirm"
         else:
-            # Just queries, execute directly
             for action in actions:
                 if action.action == "check":
                     ok, msg = check_stock(action.item_name)
@@ -615,7 +610,6 @@ async def try_ai_mode(update: Update, context: ContextTypes.DEFAULT_TYPE, text: 
                         lines.append(f"... and {len(items) - 30} more")
                     await update.message.reply_text("\n".join(lines), parse_mode="Markdown")
     else:
-        # Could not parse - show help
         await update.message.reply_text(
             "I didn't understand that. Use the menu buttons or try:\n"
             "- `/menu` for main menu\n"
