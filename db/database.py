@@ -4,7 +4,6 @@ Handles SQLite connection, schema creation, and all database operations.
 """
 
 import sqlite3
-import json
 import shutil
 import os
 from datetime import datetime, date
@@ -23,6 +22,7 @@ def get_connection():
     conn = sqlite3.connect(config.DATABASE_PATH)
     conn.row_factory = sqlite3.Row
     conn.execute("PRAGMA foreign_keys = ON")
+    conn.execute("PRAGMA journal_mode = WAL")   # better concurrency
     try:
         yield conn
         conn.commit()
@@ -137,7 +137,7 @@ def ensure_default_purposes() -> None:
     """Insert default purposes if the table is empty."""
     defaults = [
         "biriyani", "meals", "sambar", "breakfast", "snacks",
-        "special event", "regular cooking", "trial", "waste"
+        "special event", "regular cooking", "trial", "waste",
     ]
     with get_connection() as conn:
         cursor = conn.execute("SELECT COUNT(*) as count FROM purposes")
@@ -151,7 +151,7 @@ def ensure_default_purposes() -> None:
 
 
 def ensure_settings() -> None:
-    """Ensure default settings exist."""
+    """Ensure default settings exist (INSERT OR IGNORE keeps existing values)."""
     defaults = {
         "secret_word": config.SECRET_WORD,
         "reorder_days": str(config.REORDER_DAYS),
@@ -160,7 +160,7 @@ def ensure_settings() -> None:
     with get_connection() as conn:
         for key, value in defaults.items():
             conn.execute(
-                """INSERT OR IGNORE INTO settings (key, value) VALUES (?, ?)""",
+                "INSERT OR IGNORE INTO settings (key, value) VALUES (?, ?)",
                 (key, value)
             )
 
@@ -206,26 +206,22 @@ def get_item_by_id(item_id: str) -> Optional[Dict[str, Any]]:
     with get_connection() as conn:
         cursor = conn.execute("SELECT * FROM items WHERE item_id = ?", (item_id,))
         row = cursor.fetchone()
-        if row:
-            return dict(row)
-        return None
+        return dict(row) if row else None
 
 
 def get_item_by_name(item_name: str) -> Optional[Dict[str, Any]]:
-    """Get a single item by its name (case-insensitive)."""
+    """Get a single item by its name (case-insensitive, exact match)."""
     with get_connection() as conn:
         cursor = conn.execute(
             "SELECT * FROM items WHERE LOWER(item_name) = LOWER(?)",
             (item_name,)
         )
         row = cursor.fetchone()
-        if row:
-            return dict(row)
-        return None
+        return dict(row) if row else None
 
 
 def find_items_by_name_partial(name_partial: str) -> List[Dict[str, Any]]:
-    """Find items by partial name match."""
+    """Find items by partial name match (case-insensitive)."""
     with get_connection() as conn:
         cursor = conn.execute(
             "SELECT * FROM items WHERE LOWER(item_name) LIKE LOWER(?) ORDER BY item_name",
@@ -235,7 +231,7 @@ def find_items_by_name_partial(name_partial: str) -> List[Dict[str, Any]]:
 
 
 def list_all_items() -> List[Dict[str, Any]]:
-    """List all inventory items."""
+    """List all inventory items ordered by name."""
     with get_connection() as conn:
         cursor = conn.execute("SELECT * FROM items ORDER BY item_name")
         return [dict(row) for row in cursor.fetchall()]
@@ -251,18 +247,26 @@ def list_items_by_category(category: str) -> List[Dict[str, Any]]:
         return [dict(row) for row in cursor.fetchall()]
 
 
+# Whitelist of valid section column names (prevents SQL injection)
+_SECTION_COLUMN_MAP: Dict[str, str] = {
+    "rajagiri main":   "rajagiri_main",
+    "woods":           "woods",
+    "garden cafe":     "garden_cafe",
+    "bba canteen":     "bba_canteen",
+    "bba tea counter": "bba_tea_counter",
+    "wipro in":        "wipro_in",
+    "wipro out":       "wipro_out",
+}
+
+
 def list_items_by_section(section: str) -> List[Dict[str, Any]]:
-    """List items with non-zero values for a specific section/destination."""
-    column_map = {
-        "rajagiri main": "rajagiri_main",
-        "woods": "woods",
-        "garden cafe": "garden_cafe",
-        "bba canteen": "bba_canteen",
-        "bba tea counter": "bba_tea_counter",
-        "wipro in": "wipro_in",
-        "wipro out": "wipro_out",
-    }
-    col = column_map.get(section.lower(), section.lower())
+    """
+    List items that had non-zero movement for a given section today.
+    Only whitelisted column names are allowed (no SQL injection possible).
+    """
+    col = _SECTION_COLUMN_MAP.get(section.lower())
+    if not col:
+        return []   # unknown section -> return empty safely
     with get_connection() as conn:
         cursor = conn.execute(
             f"SELECT * FROM items WHERE {col} > 0 ORDER BY item_name"
@@ -281,7 +285,7 @@ def update_item(
         "avg_daily_usage", "location", "category", "purpose",
         "wipro_in", "wipro_out", "rajagiri_main", "woods",
         "garden_cafe", "bba_canteen", "bba_tea_counter",
-        "purchased", "damaged", "used"
+        "purchased", "damaged", "used",
     }
     filtered = {k: v for k, v in updates.items() if k in allowed_fields}
     if not filtered:
@@ -317,7 +321,7 @@ def delete_item(item_id: str) -> Tuple[bool, str]:
 
 
 def delete_all_items() -> Tuple[bool, str]:
-    """Delete all items (with confirmation handled at handler level)."""
+    """Delete all items and their related records."""
     with get_connection() as conn:
         conn.execute("DELETE FROM items")
         conn.execute("DELETE FROM transactions")
@@ -341,7 +345,7 @@ def record_transaction(
     performed_by: str = "",
     notes: str = "",
 ) -> int:
-    """Record a transaction. Returns the transaction ID."""
+    """Record a transaction and return its ID."""
     today = date.today().isoformat()
     cursor = conn.execute(
         """INSERT INTO transactions (
@@ -382,18 +386,34 @@ def log_undo_action(
 
 
 # Maps each action to its sub-column in the items table
-_ACTION_COLUMN_MAP = {
-    "used": "used",
-    "purchased": "purchased",
-    "damaged": "damaged",
-    "wipro in": "wipro_in",
-    "wipro out": "wipro_out",
-    "rajagiri main": "rajagiri_main",
-    "woods": "woods",
-    "garden cafe": "garden_cafe",
-    "bba canteen": "bba_canteen",
+_ACTION_COLUMN_MAP: Dict[str, str] = {
+    "used":            "used",
+    "purchased":       "purchased",
+    "damaged":         "damaged",
+    "wipro in":        "wipro_in",
+    "wipro out":       "wipro_out",
+    "rajagiri main":   "rajagiri_main",
+    "woods":           "woods",
+    "garden cafe":     "garden_cafe",
+    "bba canteen":     "bba_canteen",
     "bba tea counter": "bba_tea_counter",
 }
+
+# Actions that reduce stock
+_SUBTRACT_ACTIONS = frozenset({
+    "used", "damaged", "wipro out",
+    "rajagiri main", "woods", "garden cafe",
+    "bba canteen", "bba tea counter",
+})
+
+# Actions that increase stock
+_ADD_ACTIONS = frozenset({"purchased", "wipro in"})
+
+# Transfer actions - allowed to go below zero
+_TRANSFER_ACTIONS = frozenset({
+    "wipro out", "rajagiri main", "woods",
+    "garden cafe", "bba canteen", "bba tea counter",
+})
 
 
 def perform_stock_movement(
@@ -406,8 +426,7 @@ def perform_stock_movement(
     notes: str = "",
 ) -> Tuple[bool, str, Optional[int]]:
     """
-    Perform a stock movement action.
-    Returns (success, message, transaction_id).
+    Perform a stock movement and return (success, message, transaction_id).
     """
     item = get_item_by_id(item_id)
     if not item:
@@ -417,22 +436,22 @@ def perform_stock_movement(
     unit = item["unit"]
     item_name = item["item_name"]
 
-    # Column mapping for transfer actions
-    column_map = {
-        "used": ("used", "subtract"),
-        "purchased": ("purchased", "add"),
-        "damaged": ("damaged", "subtract"),
-        "wipro in": ("wipro_in", "add"),
-        "wipro out": ("wipro_out", "subtract"),
-        "rajagiri main": ("rajagiri_main", "subtract"),
-        "woods": ("woods", "subtract"),
-        "garden cafe": ("garden_cafe", "subtract"),
-        "bba canteen": ("bba_canteen", "subtract"),
+    column_map: Dict[str, Tuple[str, str]] = {
+        "used":            ("used",            "subtract"),
+        "purchased":       ("purchased",       "add"),
+        "damaged":         ("damaged",         "subtract"),
+        "wipro in":        ("wipro_in",        "add"),
+        "wipro out":       ("wipro_out",       "subtract"),
+        "rajagiri main":   ("rajagiri_main",   "subtract"),
+        "woods":           ("woods",           "subtract"),
+        "garden cafe":     ("garden_cafe",     "subtract"),
+        "bba canteen":     ("bba_canteen",     "subtract"),
         "bba tea counter": ("bba_tea_counter", "subtract"),
     }
 
     try:
         with get_connection() as conn:
+            # -- Stock adjustment: set absolute value --
             if action == "stock adjustment":
                 new_stock = quantity
                 adjustment = quantity - stock_before
@@ -445,9 +464,17 @@ def perform_stock_movement(
                     stock_before, new_stock, performed_by=performed_by,
                     notes=f"Adjusted from {stock_before} to {new_stock}"
                 )
-                log_undo_action(conn, tx_id, item_id, action, adjustment, stock_before, new_stock, performed_by=performed_by)
-                return True, f"Stock adjusted: {item_name} from {stock_before} to {new_stock} {unit}.", tx_id
+                log_undo_action(
+                    conn, tx_id, item_id, action, adjustment,
+                    stock_before, new_stock, performed_by=performed_by
+                )
+                return (
+                    True,
+                    f"Stock adjusted: {item_name} from {stock_before} to {new_stock} {unit}.",
+                    tx_id,
+                )
 
+            # -- Direct field edits (no undo logged - admin action) --
             elif action in ("change starting stock", "change current stock"):
                 field = "starting_stock" if action == "change starting stock" else "current_stock"
                 conn.execute(
@@ -459,19 +486,32 @@ def perform_stock_movement(
                     stock_before, quantity, performed_by=performed_by,
                     notes=f"{action}: set to {quantity}"
                 )
-                return True, f"{action.title()}: {item_name} set to {quantity} {unit}.", tx_id
+                return (
+                    True,
+                    f"{action.title()}: {item_name} set to {quantity} {unit}.",
+                    tx_id,
+                )
 
+            # -- Normal movement --
             elif action in column_map:
                 col, operation = column_map[action]
+
                 if operation == "subtract":
                     new_stock = stock_before - quantity
-                    if new_stock < 0 and action not in ("wipro out", "rajagiri main", "woods", "garden cafe", "bba canteen", "bba tea counter"):
-                        return False, f"Insufficient stock. Current: {stock_before} {unit}, requested: {quantity} {unit}.", None
+                    # Only block negative stock for consumable actions (used/damaged)
+                    if new_stock < 0 and action not in _TRANSFER_ACTIONS:
+                        return (
+                            False,
+                            f"Insufficient stock. Current: {stock_before} {unit},"
+                            f" requested: {quantity} {unit}.",
+                            None,
+                        )
                 else:
                     new_stock = stock_before + quantity
 
                 conn.execute(
-                    f"UPDATE items SET {col} = {col} + ?, current_stock = ?, last_updated = ? WHERE item_id = ?",
+                    f"UPDATE items SET {col} = {col} + ?, current_stock = ?,"
+                    f" last_updated = ? WHERE item_id = ?",
                     (quantity, new_stock, datetime.now().isoformat(), item_id)
                 )
                 tx_id = record_transaction(
@@ -479,11 +519,21 @@ def perform_stock_movement(
                     stock_before, new_stock, purpose=purpose,
                     destination=destination, performed_by=performed_by, notes=notes
                 )
-                log_undo_action(conn, tx_id, item_id, action, quantity, stock_before, new_stock, purpose or destination or "", performed_by)
-                return True, f"{action.title()}: {item_name} {quantity} {unit}. Stock: {stock_before} -> {new_stock}.", tx_id
+                log_undo_action(
+                    conn, tx_id, item_id, action, quantity,
+                    stock_before, new_stock,
+                    details=purpose or destination or "",
+                    performed_by=performed_by
+                )
+                return (
+                    True,
+                    f"{action.title()}: {item_name} {quantity} {unit}."
+                    f" Stock: {stock_before} -> {new_stock}.",
+                    tx_id,
+                )
 
             else:
-                return False, f"Unknown action: {action}", None
+                return False, f"Unknown action: '{action}'.", None
 
     except Exception as e:
         return False, f"Error performing {action}: {str(e)}", None
@@ -492,10 +542,9 @@ def perform_stock_movement(
 # --- Queries & Reports ---
 
 def get_low_stock_items() -> List[Dict[str, Any]]:
-    """Get items with days left <= reorder threshold or zero/negative stock."""
+    """Return items whose days-of-stock remaining is <= reorder threshold."""
     with get_connection() as conn:
-        cursor = conn.execute("SELECT * FROM items")
-        items = [dict(row) for row in cursor.fetchall()]
+        items = [dict(row) for row in conn.execute("SELECT * FROM items").fetchall()]
 
     reorder_days = config.REORDER_DAYS
     low_stock = []
@@ -505,7 +554,7 @@ def get_low_stock_items() -> List[Dict[str, Any]]:
         if avg > 0:
             days_left = current / avg
         else:
-            days_left = 9999
+            days_left = 9999  # no usage data -> never triggers reorder
 
         if current <= 0 or days_left <= reorder_days:
             item["days_left"] = round(days_left, 1) if avg > 0 else "N/A"
@@ -516,12 +565,12 @@ def get_low_stock_items() -> List[Dict[str, Any]]:
 
 
 def get_order_list() -> List[Dict[str, Any]]:
-    """Get order list (same as low stock but formatted for ordering)."""
+    """Alias for get_low_stock_items (used for order list display)."""
     return get_low_stock_items()
 
 
 def get_zero_stock_items() -> List[Dict[str, Any]]:
-    """Get items with zero or negative stock."""
+    """Return items with zero or negative stock."""
     with get_connection() as conn:
         cursor = conn.execute(
             "SELECT * FROM items WHERE current_stock <= 0 ORDER BY item_name"
@@ -530,41 +579,37 @@ def get_zero_stock_items() -> List[Dict[str, Any]]:
 
 
 def get_daily_report() -> Dict[str, Any]:
-    """Generate daily report of all actions."""
+    """Build today's full activity report."""
     today = date.today().isoformat()
     with get_connection() as conn:
-        cursor = conn.execute(
-            """SELECT * FROM transactions WHERE date = ? ORDER BY timestamp""",
-            (today,)
-        )
-        transactions = [dict(row) for row in cursor.fetchall()]
+        transactions = [
+            dict(row)
+            for row in conn.execute(
+                "SELECT * FROM transactions WHERE date = ? ORDER BY timestamp",
+                (today,)
+            ).fetchall()
+        ]
 
-    used_items = [t for t in transactions if t["action"] == "used"]
-    purchased_items = [t for t in transactions if t["action"] == "purchased"]
-    damaged_items = [t for t in transactions if t["action"] == "damaged"]
-    wipro_in = [t for t in transactions if t["action"] == "wipro in"]
-    wipro_out = [t for t in transactions if t["action"] == "wipro out"]
-    transfers = [t for t in transactions if t["action"] in (
-        "rajagiri main", "woods", "garden cafe", "bba canteen", "bba tea counter"
-    )]
-    adjustments = [t for t in transactions if t["action"] == "stock adjustment"]
-    edits = [t for t in transactions if t["action"] in ("change starting stock", "change current stock")]
+    def _filter(action_val):
+        return [t for t in transactions if t["action"] == action_val]
 
-    all_items = list_all_items()
-    low_stock = get_low_stock_items()
+    def _filter_in(action_vals):
+        return [t for t in transactions if t["action"] in action_vals]
 
     return {
         "date": today,
-        "used_items": used_items,
-        "purchased_items": purchased_items,
-        "damaged_items": damaged_items,
-        "wipro_in": wipro_in,
-        "wipro_out": wipro_out,
-        "transfers": transfers,
-        "adjustments": adjustments,
-        "edits": edits,
-        "stock_status": all_items,
-        "low_stock": low_stock,
+        "used_items":      _filter("used"),
+        "purchased_items": _filter("purchased"),
+        "damaged_items":   _filter("damaged"),
+        "wipro_in":        _filter("wipro in"),
+        "wipro_out":       _filter("wipro out"),
+        "transfers":       _filter_in({
+            "rajagiri main", "woods", "garden cafe", "bba canteen", "bba tea counter"
+        }),
+        "adjustments":     _filter("stock adjustment"),
+        "edits":           _filter_in({"change starting stock", "change current stock"}),
+        "stock_status":    list_all_items(),
+        "low_stock":       get_low_stock_items(),
         "total_transactions": len(transactions),
     }
 
@@ -573,8 +618,7 @@ def get_daily_report() -> Dict[str, Any]:
 
 def list_purposes() -> List[str]:
     with get_connection() as conn:
-        cursor = conn.execute("SELECT name FROM purposes ORDER BY name")
-        return [row["name"] for row in cursor.fetchall()]
+        return [row["name"] for row in conn.execute("SELECT name FROM purposes ORDER BY name")]
 
 
 def add_purpose(name: str) -> Tuple[bool, str]:
@@ -628,7 +672,7 @@ def set_secret_word(new_word: str) -> None:
 
 
 def verify_secret_word(word: str) -> bool:
-    return word == get_secret_word()
+    return word.strip() == get_secret_word()
 
 
 # --- Undo ---
@@ -636,113 +680,101 @@ def verify_secret_word(word: str) -> bool:
 def get_last_undoable_action() -> Optional[Dict[str, Any]]:
     with get_connection() as conn:
         cursor = conn.execute(
-            """SELECT * FROM undo_log WHERE reversed = 0 ORDER BY id DESC LIMIT 1"""
+            "SELECT * FROM undo_log WHERE reversed = 0 ORDER BY id DESC LIMIT 1"
         )
         row = cursor.fetchone()
         return dict(row) if row else None
 
 
-def mark_undo_reversed(undo_id: int) -> None:
-    with get_connection() as conn:
-        conn.execute("UPDATE undo_log SET reversed = 1 WHERE id = ?", (undo_id,))
-
-
 def undo_last_action(performed_by: str = "") -> Tuple[bool, str]:
-    """Undo the last stock-affecting action.
-    
-    Restores current_stock AND decrements the relevant sub-column
-    (used, purchased, damaged, wipro_in, etc.) so the daily report
-    accurately reflects the reversal.
     """
-    last_action = get_last_undoable_action()
-    if not last_action:
+    Undo the last stock-affecting action.
+    Restores current_stock AND decrements the relevant sub-column so the
+    daily report accurately reflects the reversal.
+    """
+    last = get_last_undoable_action()
+    if not last:
         return False, "No action to undo."
 
-    item_id = last_action["item_id"]
-    action = last_action["action"]
-    stock_before = last_action["stock_before"]
-    quantity = abs(last_action["quantity"])
+    item_id      = last["item_id"]
+    action       = last["action"]
+    stock_before = last["stock_before"]
+    quantity     = abs(last["quantity"])
 
     item = get_item_by_id(item_id)
     if not item:
         return False, f"Item '{item_id}' no longer exists."
 
     current_stock = item["current_stock"]
-    unit = item["unit"]
-    item_name = item["item_name"]
-
-    # Actions that subtracted stock (restore by adding back)
-    subtract_actions = {
-        "used", "damaged", "wipro out",
-        "rajagiri main", "woods", "garden cafe",
-        "bba canteen", "bba tea counter",
-    }
-    # Actions that added stock (restore by subtracting)
-    add_actions = {"purchased", "wipro in"}
+    unit          = item["unit"]
+    item_name     = item["item_name"]
 
     try:
         with get_connection() as conn:
-            if action in subtract_actions:
+            now = datetime.now().isoformat()
+
+            if action in _SUBTRACT_ACTIONS:
                 new_stock = current_stock + quantity
-                # Also decrement the sub-column that was incremented
                 sub_col = _ACTION_COLUMN_MAP.get(action)
                 if sub_col:
                     conn.execute(
-                        f"UPDATE items SET current_stock = ?, {sub_col} = MAX(0, {sub_col} - ?), "
-                        f"last_updated = ? WHERE item_id = ?",
-                        (new_stock, quantity, datetime.now().isoformat(), item_id)
+                        f"UPDATE items SET current_stock = ?,"
+                        f" {sub_col} = MAX(0, {sub_col} - ?),"
+                        f" last_updated = ? WHERE item_id = ?",
+                        (new_stock, quantity, now, item_id)
                     )
                 else:
                     conn.execute(
                         "UPDATE items SET current_stock = ?, last_updated = ? WHERE item_id = ?",
-                        (new_stock, datetime.now().isoformat(), item_id)
+                        (new_stock, now, item_id)
                     )
 
-            elif action in add_actions:
-                new_stock = max(0, current_stock - quantity)
+            elif action in _ADD_ACTIONS:
+                new_stock = max(0.0, current_stock - quantity)
                 sub_col = _ACTION_COLUMN_MAP.get(action)
                 if sub_col:
                     conn.execute(
-                        f"UPDATE items SET current_stock = ?, {sub_col} = MAX(0, {sub_col} - ?), "
-                        f"last_updated = ? WHERE item_id = ?",
-                        (new_stock, quantity, datetime.now().isoformat(), item_id)
+                        f"UPDATE items SET current_stock = ?,"
+                        f" {sub_col} = MAX(0, {sub_col} - ?),"
+                        f" last_updated = ? WHERE item_id = ?",
+                        (new_stock, quantity, now, item_id)
                     )
                 else:
                     conn.execute(
                         "UPDATE items SET current_stock = ?, last_updated = ? WHERE item_id = ?",
-                        (new_stock, datetime.now().isoformat(), item_id)
+                        (new_stock, now, item_id)
                     )
 
             elif action == "stock adjustment":
-                # Restore directly to the pre-adjustment value
-                new_stock = stock_before
+                new_stock = stock_before   # restore to pre-adjustment value
                 conn.execute(
                     "UPDATE items SET current_stock = ?, last_updated = ? WHERE item_id = ?",
-                    (new_stock, datetime.now().isoformat(), item_id)
+                    (new_stock, now, item_id)
                 )
 
             else:
-                return False, f"Cannot undo action type: {action}"
+                return False, f"Cannot undo action type: '{action}'."
 
-            # Record the undo as a transaction
-            today = date.today().isoformat()
+            # Record the reversal in the transaction log
             conn.execute(
                 """INSERT INTO transactions (
                     timestamp, date, item_id, item_name, action, quantity, unit,
                     stock_before, stock_after, performed_by, notes
                 ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
                 (
-                    datetime.now().isoformat(), today, item_id, item_name,
+                    now, date.today().isoformat(), item_id, item_name,
                     f"undo:{action}", quantity, unit,
                     current_stock, new_stock, performed_by,
                     f"Undo of {action}: restored from {current_stock} to {new_stock}"
                 )
             )
 
-            # Mark as reversed
-            conn.execute("UPDATE undo_log SET reversed = 1 WHERE id = ?", (last_action["id"],))
+            conn.execute("UPDATE undo_log SET reversed = 1 WHERE id = ?", (last["id"],))
 
-        return True, f"Undo successful: {item_name} restored from {current_stock} to {new_stock} {unit}."
+        return (
+            True,
+            f"Undo successful: {item_name} restored from {current_stock} to {new_stock} {unit}.",
+        )
     except Exception as e:
         return False, f"Error during undo: {str(e)}"
 
@@ -751,7 +783,7 @@ def undo_last_action(performed_by: str = "") -> Tuple[bool, str]:
 
 def create_backup(note: str = "") -> Tuple[bool, str, Optional[str]]:
     try:
-        timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+        timestamp  = datetime.now().strftime("%Y%m%d_%H%M%S")
         backup_dir = Path(config.DATABASE_PATH).parent / "backups"
         backup_dir.mkdir(exist_ok=True)
 
@@ -773,10 +805,12 @@ def create_backup(note: str = "") -> Tuple[bool, str, Optional[str]]:
 
 def list_backups() -> List[Dict[str, Any]]:
     with get_connection() as conn:
-        cursor = conn.execute(
-            "SELECT * FROM backups ORDER BY created_at DESC"
-        )
-        return [dict(row) for row in cursor.fetchall()]
+        return [
+            dict(row)
+            for row in conn.execute(
+                "SELECT * FROM backups ORDER BY created_at DESC"
+            ).fetchall()
+        ]
 
 
 def restore_backup(backup_path: str) -> Tuple[bool, str]:
@@ -784,9 +818,13 @@ def restore_backup(backup_path: str) -> Tuple[bool, str]:
         if not os.path.exists(backup_path):
             return False, f"Backup file not found: {backup_path}"
 
-        safety_timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
-        safety_path = Path(config.DATABASE_PATH).parent / "backups" / f"prometheus_pre_restore_{safety_timestamp}.db"
-        Path(safety_path).parent.mkdir(exist_ok=True)
+        safety_ts   = datetime.now().strftime("%Y%m%d_%H%M%S")
+        safety_path = (
+            Path(config.DATABASE_PATH).parent
+            / "backups"
+            / f"prometheus_pre_restore_{safety_ts}.db"
+        )
+        safety_path.parent.mkdir(exist_ok=True)
         if os.path.exists(config.DATABASE_PATH):
             shutil.copy2(config.DATABASE_PATH, safety_path)
 
@@ -800,38 +838,33 @@ def restore_backup(backup_path: str) -> Tuple[bool, str]:
 
 def reset_day(performed_by: str = "") -> Tuple[bool, str]:
     """
-    Reset day: carry current stock as starting stock for new day.
-    Reset used, purchased, damaged, transfer columns to 0.
+    Carry current_stock -> starting_stock and zero all daily counters.
     """
     try:
         with get_connection() as conn:
             today = date.today().isoformat()
+            now   = datetime.now().isoformat()
 
-            cursor = conn.execute("SELECT * FROM items")
-            items = cursor.fetchall()
-
-            for item in items:
-                new_starting = item["current_stock"]
+            for item in conn.execute("SELECT * FROM items").fetchall():
                 conn.execute(
                     """UPDATE items SET
-                        starting_stock = ?,
-                        used = 0,
-                        purchased = 0,
-                        damaged = 0,
-                        wipro_in = 0,
-                        wipro_out = 0,
-                        rajagiri_main = 0,
-                        woods = 0,
-                        garden_cafe = 0,
-                        bba_canteen = 0,
-                        bba_tea_counter = 0,
-                        purpose = '',
-                        working_date = ?,
-                        last_updated = ?,
-                        last_updated_by = ?
+                        starting_stock    = ?,
+                        used              = 0,
+                        purchased         = 0,
+                        damaged           = 0,
+                        wipro_in          = 0,
+                        wipro_out         = 0,
+                        rajagiri_main     = 0,
+                        woods             = 0,
+                        garden_cafe       = 0,
+                        bba_canteen       = 0,
+                        bba_tea_counter   = 0,
+                        purpose           = '',
+                        working_date      = ?,
+                        last_updated      = ?,
+                        last_updated_by   = ?
                     WHERE item_id = ?""",
-                    (new_starting, today, datetime.now().isoformat(),
-                     performed_by, item["item_id"])
+                    (item["current_stock"], today, now, performed_by, item["item_id"])
                 )
 
             conn.execute(
@@ -839,36 +872,46 @@ def reset_day(performed_by: str = "") -> Tuple[bool, str]:
                 ("working_date", today)
             )
 
-        return True, f"Day reset complete. Working date set to {today}. All counters reset."
+        return True, f"Day reset complete. Working date: {today}. All counters reset."
     except Exception as e:
         return False, f"Reset day failed: {str(e)}"
 
 
-# --- CSV Import ---
+# --- Bulk CSV Import ---
 
 def bulk_import_items(items_data: List[Dict[str, Any]]) -> Tuple[int, int, List[str]]:
-    success = 0
-    failed = 0
-    errors = []
+    """Import a list of item dicts. Handles both 'avg_daily_usage' and
+    'average_daily_usage' column names (seed_items.csv uses the long form)."""
+    success = failed = 0
+    errors: List[str] = []
 
     for idx, row in enumerate(items_data, 1):
-        item_id = row.get("item_id", "")
-        item_name = row.get("item_name", "")
+        item_id   = str(row.get("item_id",   "")).strip()
+        item_name = str(row.get("item_name", "")).strip()
         if not item_id or not item_name:
             failed += 1
             errors.append(f"Row {idx}: Missing item_id or item_name")
             continue
 
-        ok, msg = add_item(
-            item_id=item_id,
-            item_name=item_name,
-            unit=row.get("unit", "pcs"),
-            starting_stock=float(row.get("starting_stock", 0) or 0),
-            current_stock=float(row.get("current_stock", 0) or 0),
-            avg_daily_usage=float(row.get("avg_daily_usage", 0) or 0),
-            location=row.get("location", ""),
-            category=row.get("category", ""),
-        )
+        # Accept either column name for avg daily usage
+        avg_raw = row.get("avg_daily_usage") or row.get("average_daily_usage") or 0
+
+        try:
+            ok, msg = add_item(
+                item_id=item_id,
+                item_name=item_name,
+                unit=str(row.get("unit", "pcs")).strip() or "pcs",
+                starting_stock=float(row.get("starting_stock", 0) or 0),
+                current_stock=float(row.get("current_stock", 0) or 0),
+                avg_daily_usage=float(avg_raw),
+                location=str(row.get("location", "")).strip(),
+                category=str(row.get("category", "")).strip(),
+            )
+        except (ValueError, TypeError) as e:
+            failed += 1
+            errors.append(f"Row {idx}: Invalid numeric value - {e}")
+            continue
+
         if ok:
             success += 1
         else:
@@ -878,7 +921,7 @@ def bulk_import_items(items_data: List[Dict[str, Any]]) -> Tuple[int, int, List[
     return success, failed, errors
 
 
-# --- CSV/Excel Export ---
+# --- CSV / Excel Export ---
 
 def export_to_csv() -> Tuple[bool, str, Optional[str]]:
     try:
@@ -887,7 +930,7 @@ def export_to_csv() -> Tuple[bool, str, Optional[str]]:
         if not items:
             return False, "No items to export.", None
 
-        timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+        timestamp  = datetime.now().strftime("%Y%m%d_%H%M%S")
         export_dir = Path(config.DATABASE_PATH).parent / "exports"
         export_dir.mkdir(exist_ok=True)
         filepath = export_dir / f"prometheus_export_{timestamp}.csv"
@@ -897,11 +940,11 @@ def export_to_csv() -> Tuple[bool, str, Optional[str]]:
             "used", "wipro_in", "wipro_out", "rajagiri_main", "woods",
             "garden_cafe", "bba_canteen", "bba_tea_counter",
             "purchased", "damaged", "avg_daily_usage",
-            "location", "category", "purpose", "last_updated"
+            "location", "category", "purpose", "last_updated",
         ]
 
         with open(filepath, "w", newline="", encoding="utf-8") as f:
-            writer = csv.DictWriter(f, fieldnames=fieldnames)
+            writer = csv.DictWriter(f, fieldnames=fieldnames, extrasaction="ignore")
             writer.writeheader()
             for item in items:
                 writer.writerow({k: item.get(k, "") for k in fieldnames})
@@ -909,6 +952,13 @@ def export_to_csv() -> Tuple[bool, str, Optional[str]]:
         return True, f"Exported {len(items)} items to CSV.", str(filepath)
     except Exception as e:
         return False, f"Export failed: {str(e)}", None
+
+
+def _col_letter(n: int) -> str:
+    """Convert 1-based column index to Excel letter(s). Handles A-Z and AA-AZ."""
+    if n <= 26:
+        return chr(64 + n)
+    return chr(64 + (n - 1) // 26) + chr(65 + (n - 1) % 26)
 
 
 def export_to_excel() -> Tuple[bool, str, Optional[str]]:
@@ -920,22 +970,20 @@ def export_to_excel() -> Tuple[bool, str, Optional[str]]:
         if not items:
             return False, "No items to export.", None
 
-        timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+        timestamp  = datetime.now().strftime("%Y%m%d_%H%M%S")
         export_dir = Path(config.DATABASE_PATH).parent / "exports"
         export_dir.mkdir(exist_ok=True)
-        filepath = export_dir / f"prometheus_export_{timestamp}.xlsx"
+        filepath   = export_dir / f"prometheus_export_{timestamp}.xlsx"
 
         wb = Workbook()
         ws = wb.active
         ws.title = "Inventory"
 
-        header_font = Font(bold=True, color="FFFFFF")
-        header_fill = PatternFill(start_color="2F5496", end_color="2F5496", fill_type="solid")
-        thin_border = Border(
-            left=Side(style="thin"),
-            right=Side(style="thin"),
-            top=Side(style="thin"),
-            bottom=Side(style="thin")
+        header_font  = Font(bold=True, color="FFFFFF")
+        header_fill  = PatternFill(start_color="2F5496", end_color="2F5496", fill_type="solid")
+        thin_border  = Border(
+            left=Side(style="thin"), right=Side(style="thin"),
+            top=Side(style="thin"),  bottom=Side(style="thin"),
         )
 
         headers = [
@@ -943,40 +991,30 @@ def export_to_excel() -> Tuple[bool, str, Optional[str]]:
             "Used", "Wipro In", "Wipro Out", "Rajagiri Main", "Woods",
             "Garden Cafe", "BBA Canteen", "BBA Tea Counter",
             "Purchased", "Damaged", "Avg Daily Usage",
-            "Location", "Category", "Purpose", "Last Updated"
+            "Location", "Category", "Purpose", "Last Updated",
         ]
 
-        for col, header in enumerate(headers, 1):
-            cell = ws.cell(row=1, column=col, value=header)
-            cell.font = header_font
-            cell.fill = header_fill
+        for col_idx, header in enumerate(headers, 1):
+            cell = ws.cell(row=1, column=col_idx, value=header)
+            cell.font      = header_font
+            cell.fill      = header_fill
             cell.alignment = Alignment(horizontal="center")
-            cell.border = thin_border
+            cell.border    = thin_border
+
+        field_keys = [
+            "item_id", "item_name", "unit", "starting_stock", "current_stock",
+            "used", "wipro_in", "wipro_out", "rajagiri_main", "woods",
+            "garden_cafe", "bba_canteen", "bba_tea_counter",
+            "purchased", "damaged", "avg_daily_usage",
+            "location", "category", "purpose", "last_updated",
+        ]
 
         for row_idx, item in enumerate(items, 2):
-            ws.cell(row=row_idx, column=1, value=item.get("item_id", ""))
-            ws.cell(row=row_idx, column=2, value=item.get("item_name", ""))
-            ws.cell(row=row_idx, column=3, value=item.get("unit", ""))
-            ws.cell(row=row_idx, column=4, value=item.get("starting_stock", 0))
-            ws.cell(row=row_idx, column=5, value=item.get("current_stock", 0))
-            ws.cell(row=row_idx, column=6, value=item.get("used", 0))
-            ws.cell(row=row_idx, column=7, value=item.get("wipro_in", 0))
-            ws.cell(row=row_idx, column=8, value=item.get("wipro_out", 0))
-            ws.cell(row=row_idx, column=9, value=item.get("rajagiri_main", 0))
-            ws.cell(row=row_idx, column=10, value=item.get("woods", 0))
-            ws.cell(row=row_idx, column=11, value=item.get("garden_cafe", 0))
-            ws.cell(row=row_idx, column=12, value=item.get("bba_canteen", 0))
-            ws.cell(row=row_idx, column=13, value=item.get("bba_tea_counter", 0))
-            ws.cell(row=row_idx, column=14, value=item.get("purchased", 0))
-            ws.cell(row=row_idx, column=15, value=item.get("damaged", 0))
-            ws.cell(row=row_idx, column=16, value=item.get("avg_daily_usage", 0))
-            ws.cell(row=row_idx, column=17, value=item.get("location", ""))
-            ws.cell(row=row_idx, column=18, value=item.get("category", ""))
-            ws.cell(row=row_idx, column=19, value=item.get("purpose", ""))
-            ws.cell(row=row_idx, column=20, value=item.get("last_updated", ""))
+            for col_idx, key in enumerate(field_keys, 1):
+                ws.cell(row=row_idx, column=col_idx, value=item.get(key, ""))
 
-        for col in range(1, len(headers) + 1):
-            ws.column_dimensions[chr(64 + col) if col <= 26 else "A" + chr(64 + col - 26)].width = 16
+        for col_idx in range(1, len(headers) + 1):
+            ws.column_dimensions[_col_letter(col_idx)].width = 16
 
         wb.save(filepath)
         return True, f"Exported {len(items)} items to Excel.", str(filepath)
