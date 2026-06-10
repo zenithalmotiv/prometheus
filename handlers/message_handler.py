@@ -146,13 +146,12 @@ async def handle_movement_item(update: Update, context: ContextTypes.DEFAULT_TYP
         purposes_kb.append([InlineKeyboardButton("Custom Purpose", callback_data="pur_sel_custom")])
         purposes_kb.append([InlineKeyboardButton("Cancel", callback_data="menu_main")])
         await update.message.reply_text(
-            f"Select purpose for *{action.title()}* of *{item['item_name']}*:",
-            reply_markup=InlineKeyboardMarkup(purposes_kb), parse_mode="Markdown"
+            f"Select purpose for {action.title()} of {item['item_name']}:",
+            reply_markup=InlineKeyboardMarkup(purposes_kb)
         )
     else:
         await update.message.reply_text(
-            f"*{action.title()}* - {item['item_name']} ({item['current_stock']} {item['unit']})\nEnter quantity:",
-            parse_mode="Markdown"
+            f"{action.title()} - {item['item_name']} ({item['current_stock']} {item['unit']})\nEnter quantity:"
         )
         context.user_data["awaiting"] = "movement_qty"
 
@@ -192,15 +191,14 @@ async def handle_custom_purpose(update: Update, context: ContextTypes.DEFAULT_TY
     item = find_item(item_id)
     item_name = item["item_name"] if item else item_id
     await update.message.reply_text(
-        f"*{action.title()}* - {item_name}\nPurpose: {text}\nEnter quantity:",
-        parse_mode="Markdown"
+        f"{action.title()} - {item_name}\nPurpose: {text}\nEnter quantity:"
     )
     context.user_data["awaiting"] = "movement_qty"
 
 
 async def handle_check_stock(update: Update, context: ContextTypes.DEFAULT_TYPE, text: str):
     ok, msg = check_stock(text)
-    await update.message.reply_text(msg, parse_mode="Markdown", reply_markup=main_menu_keyboard())
+    await update.message.reply_text(msg, reply_markup=main_menu_keyboard())
 
 
 async def handle_add_item(update: Update, context: ContextTypes.DEFAULT_TYPE, text: str):
@@ -208,8 +206,7 @@ async def handle_add_item(update: Update, context: ContextTypes.DEFAULT_TYPE, te
     existing_ids = [it["item_id"] for it in get_all_items()]
     if len(parts) < 2:
         await update.message.reply_text(
-            "Invalid format. Use:\n`Name | unit | stock | avg_usage`\nExample: `Rice | kg | 150 | 40`",
-            parse_mode="Markdown"
+            "Invalid format. Use: Name | unit | stock | avg_usage\nExample: Rice | kg | 150 | 40"
         )
         return
     if _looks_like_item_id(parts[0]) and len(parts) >= 3:
@@ -228,8 +225,8 @@ async def handle_add_item(update: Update, context: ContextTypes.DEFAULT_TYPE, te
         starting_stock=starting_stock, current_stock=current_stock, avg_daily_usage=avg_usage,
     )
     await update.message.reply_text(
-        f"{msg}\nID assigned: `{item_id}`" if ok else msg,
-        reply_markup=inventory_menu_keyboard(), parse_mode="Markdown"
+        f"{msg} ID: {item_id}" if ok else msg,
+        reply_markup=inventory_menu_keyboard()
     )
 
 
@@ -267,8 +264,7 @@ async def handle_add_multiple(update: Update, context: ContextTypes.DEFAULT_TYPE
         await update.message.reply_text(msg, reply_markup=inventory_menu_keyboard())
     else:
         await update.message.reply_text(
-            "No valid items found. Use format:\n`Name | unit | stock | avg_usage`",
-            parse_mode="Markdown"
+            "No valid items found. Use format: Name | unit | stock | avg_usage"
         )
 
 
@@ -343,8 +339,7 @@ async def handle_adjustment(update: Update, context: ContextTypes.DEFAULT_TYPE, 
     parts = text.split(None, 1)
     if len(parts) < 2:
         await update.message.reply_text(
-            "Format: `<item_name_or_id> <new_stock_value>`\nExample: `rice 100`",
-            parse_mode="Markdown"
+            "Format: <item_name_or_id> <new_stock_value>\nExample: rice 100"
         )
         return
     try:
@@ -378,17 +373,15 @@ async def handle_restore_select(update: Update, context: ContextTypes.DEFAULT_TY
 
 
 async def _execute_ai_action(parsed, user_id: int, update: Update) -> str:
-    """Execute a single parsed AI action and return a result string."""
     a = parsed.action
 
-    # --- Query / no-side-effect actions ---
     if a == "check":
         ok, msg = check_stock(parsed.item_name)
         return msg
 
     if a == "list":
         items = get_all_items()
-        lines = [f"*{len(items)} items:*"]
+        lines = [f"{len(items)} items in inventory:"]
         for item in items[:50]:
             lines.append(f"- {item['item_name']}: {item['current_stock']} {item['unit']}")
         if len(items) > 50:
@@ -399,7 +392,7 @@ async def _execute_ai_action(parsed, user_id: int, update: Update) -> str:
         items = get_low_stock()
         if not items:
             return "No low stock items."
-        lines = ["*Low Stock:*"]
+        lines = ["Low Stock:"]
         for item in items:
             status = "URGENT" if item["urgent"] else f"{item['days_left']} days left"
             lines.append(f"- {item['item_name']}: {item['current_stock']} {item['unit']} ({status})")
@@ -409,21 +402,21 @@ async def _execute_ai_action(parsed, user_id: int, update: Update) -> str:
         items = get_order()
         if not items:
             return "No items need ordering."
-        lines = ["*Order List:*"]
+        lines = ["Order List:"]
         for item in items:
             lines.append(f"- {item['item_name']}: {item['current_stock']} {item['unit']}")
         return "\n".join(lines)
 
     if a == "daily_report":
         report = generate_daily_report()
-        lines = [f"*Daily Report - {report['date']}*"]
+        lines = [f"Daily Report - {report['date']}"]
         for section, label in [
             ("used_items", "Used"), ("purchased_items", "Purchased"),
             ("damaged_items", "Damaged"), ("wipro_in", "Wipro In"),
             ("wipro_out", "Wipro Out"), ("transfers", "Transfers"),
         ]:
             if report.get(section):
-                lines.append(f"\n*{label}:*")
+                lines.append(f"\n{label}:")
                 for t in report[section]:
                     lines.append(f"- {t['item_name']}: {t['quantity']} {t['unit']}")
         lines.append(f"\nTotal transactions: {report['total_transactions']}")
@@ -433,19 +426,17 @@ async def _execute_ai_action(parsed, user_id: int, update: Update) -> str:
         items = get_zero_stock()
         if not items:
             return "No zero stock items."
-        lines = ["*Zero Stock:*"]
+        lines = ["Zero Stock:"]
         for item in items:
             lines.append(f"- {item['item_name']}")
         return "\n".join(lines)
 
-    # --- Exports ---
     if a == "export_csv":
         return "__EXPORT_CSV__"
 
     if a == "export_excel":
         return "__EXPORT_EXCEL__"
 
-    # --- Item management ---
     if a == "delete_item":
         item = find_item(parsed.item_name)
         if not item:
@@ -465,7 +456,7 @@ async def _execute_ai_action(parsed, user_id: int, update: Update) -> str:
             current_stock=parsed.quantity,
             avg_daily_usage=avg,
         )
-        return f"{msg} (ID: `{item_id}`)" if ok else msg
+        return f"{msg} (ID: {item_id})" if ok else msg
 
     if a == "set_avg":
         item = find_item(parsed.item_name)
@@ -501,7 +492,6 @@ async def _execute_ai_action(parsed, user_id: int, update: Update) -> str:
         ok, msg = do_reset_day(str(user_id))
         return msg
 
-    # --- Regular stock movements ---
     item = find_item(parsed.item_name)
     if not item:
         return f"Item '{parsed.item_name}' not found."
@@ -532,7 +522,7 @@ async def handle_ai_confirmation(update: Update, context: ContextTypes.DEFAULT_T
                     with open(filepath, "rb") as f:
                         await update.message.reply_document(
                             document=f, filename=filepath.split("/")[-1],
-                            caption="📊 Inventory CSV Export"
+                            caption="Inventory CSV Export"
                         )
                 else:
                     results.append(msg)
@@ -543,7 +533,7 @@ async def handle_ai_confirmation(update: Update, context: ContextTypes.DEFAULT_T
                     with open(filepath, "rb") as f:
                         await update.message.reply_document(
                             document=f, filename=filepath.split("/")[-1],
-                            caption="📊 Inventory Excel Export"
+                            caption="Inventory Excel Export"
                         )
                 else:
                     results.append(msg)
@@ -553,18 +543,15 @@ async def handle_ai_confirmation(update: Update, context: ContextTypes.DEFAULT_T
         session["pending_actions"] = []
         if results:
             await update.message.reply_text(
-                "*Done:*\n" + "\n".join(f"- {r}" for r in results),
-                reply_markup=main_menu_keyboard(), parse_mode="Markdown"
+                "Done:\n" + "\n".join(f"- {r}" for r in results),
+                reply_markup=main_menu_keyboard()
             )
 
     elif text.lower() in ("no", "n", "cancel"):
         session["pending_actions"] = []
         await update.message.reply_text("Action cancelled.", reply_markup=main_menu_keyboard())
     else:
-        await update.message.reply_text(
-            "Please reply with *yes* to confirm or *no* to cancel.",
-            parse_mode="Markdown"
-        )
+        await update.message.reply_text("Please reply with YES to confirm or NO to cancel.")
         context.user_data["awaiting"] = "ai_confirm"
 
 
@@ -572,39 +559,37 @@ async def try_ai_mode(update: Update, context: ContextTypes.DEFAULT_TYPE, text: 
     user_id = update.effective_user.id
     session = get_session(user_id)
 
-    success, actions = ai_service.parse(text)
+    # NOTE: ai_service.parse() is async — must be awaited
+    success, actions = await ai_service.parse(text)
 
     if not success or not actions:
         await update.message.reply_text(
             "I didn't understand that. Try:\n"
-            "- *Used:* `used 5 kg rice for biriyani`\n"
-            "- *Add item:* `add item rice 150 kg avg 40`\n"
-            "- *List:* `show all items` or `item list`\n"
-            "- *Export:* `give me excel` or `export csv`\n"
-            "- *Report:* `daily report`\n"
-            "- *Check:* `check rice`\n"
-            "- Or use `/menu` for buttons",
-            reply_markup=main_menu_keyboard(),
-            parse_mode="Markdown"
+            "- Used: used 5 kg rice for biriyani\n"
+            "- Add item: add item rice 150 kg avg 40\n"
+            "- List: show all items\n"
+            "- Export: give me excel\n"
+            "- Report: daily report\n"
+            "- Check: check rice\n"
+            "- Or use /menu for buttons",
+            reply_markup=main_menu_keyboard()
         )
         return
 
-    # Actions that don't need confirmation (pure reads)
     READ_ONLY = {"check", "list", "low_stock", "order_list", "daily_report", "zero_stock"}
     write_actions = [a for a in actions if a.action not in READ_ONLY]
 
     if write_actions:
-        # Show confirmation for anything that changes data or triggers a file send
         session["pending_actions"] = actions
         confirmation_msg = ai_service.format_for_confirmation(actions)
         kb = [[InlineKeyboardButton("Yes", callback_data="ai_confirm_yes"),
                InlineKeyboardButton("No", callback_data="ai_confirm_no")]]
+        # Plain text only — no parse_mode to avoid Markdown crashes
         await update.message.reply_text(
-            confirmation_msg, reply_markup=InlineKeyboardMarkup(kb), parse_mode="Markdown"
+            confirmation_msg, reply_markup=InlineKeyboardMarkup(kb)
         )
         context.user_data["awaiting"] = "ai_confirm"
     else:
-        # Safe reads — execute immediately without asking
         for parsed in actions:
             result = await _execute_ai_action(parsed, user_id, update)
-            await update.message.reply_text(result, parse_mode="Markdown")
+            await update.message.reply_text(result)
