@@ -35,6 +35,7 @@ MOVEMENT_KEYWORDS = {
     "check": ["check", "show", "tell me about", "what is the stock", "how much"],
     "low stock": ["low stock", "what to order", "order list", "what should i buy"],
     "list": ["list all", "show all", "inventory list", "all items"],
+    "delete_item": ["delete", "remove", "delete item", "remove item", "get rid of", "drop"],
 }
 
 UNITS = ["kg", "g", "gram", "grams", "l", "litre", "liter", "litres", "ml", "pcs", "piece", "pieces", "packet", "packets", "box", "boxes", "bottle", "bottles", "tin", "tins", "can", "cans"]
@@ -60,14 +61,15 @@ Parse the user's natural language request into a structured JSON action.
 
 Available actions: used, purchased, damaged, wipro_in, wipro_out, 
 rajagiri_main, woods, garden_cafe, bba_canteen, bba_tea_counter, 
-check_stock, low_stock, list_all, add_item.
+check_stock, low_stock, list_all, add_item, delete_item.
 
 Rules:
 - Extract item_name, quantity, unit, purpose (for "used" action), and destination (for transfers).
-- Quantity must be a number.
+- Quantity must be a number. For delete_item, quantity is 0.
 - Unit can be: kg, g, L, ml, pcs, packet, box, bottle, tin, can.
 - If the user mentions multiple items, return an array of actions.
 - If uncertain, set confidence below 0.8 and include a note.
+- For delete/remove requests (e.g. "remove rice", "delete the item sugar"), use action "delete_item".
 
 Respond ONLY with valid JSON in this format:
 {
@@ -88,6 +90,7 @@ Respond ONLY with valid JSON in this format:
 For check_stock: set action to "check_stock" and item_name.
 For low_stock/order_list: set action to "low_stock".
 For list_all: set action to "list_all".
+For delete_item: set action to "delete_item" and item_name. Quantity is 0.
 """
 
     def parse_with_gemini(self, text: str) -> Tuple[bool, list]:
@@ -130,6 +133,7 @@ For list_all: set action to "list_all".
                     "check_stock": "check",
                     "low_stock": "low stock",
                     "list_all": "list",
+                    "delete_item": "delete_item",
                 }
                 action = action_map.get(action, action)
 
@@ -155,7 +159,6 @@ For list_all: set action to "list_all".
         actions = []
 
         # Check for multiple items in one message (e.g., "5 kg rice and 2 L oil")
-        # Split by common separators
         parts = re.split(r'\s+and\s+|\s*,\s*', text_lower)
 
         for part in parts:
@@ -181,6 +184,20 @@ For list_all: set action to "list_all".
 
         if not detected_action:
             return None
+
+        # Handle delete_item: no quantity needed, just item name
+        if detected_action == "delete_item":
+            item_name = self._extract_item_name_for_delete(text_lower)
+            return ParsedAction(
+                action="delete_item",
+                item_name=item_name,
+                quantity=0,
+                unit="",
+                purpose="",
+                destination="",
+                raw_input=text,
+                confidence=0.85,
+            )
 
         # Extract quantity
         quantity = self._extract_quantity(text_lower)
@@ -227,13 +244,20 @@ For list_all: set action to "list_all".
             confidence=0.7,
         )
 
+    def _extract_item_name_for_delete(self, text: str) -> str:
+        """Extract item name from a delete/remove request."""
+        # Remove delete keywords
+        for kw in MOVEMENT_KEYWORDS.get("delete_item", []):
+            text = text.replace(kw, "")
+        # Remove filler words
+        text = re.sub(r'\b(the|item|a|an|please|from|inventory)\b', '', text)
+        return text.strip()
+
     def _extract_quantity(self, text: str) -> float:
         """Extract quantity number from text."""
-        # Match patterns like "5 kg", "2.5 L", "500 g"
         matches = re.findall(r'(\d+\.?\d*)\s*(?:kg|g|gram|grams|l|litre|liter|litres|ml|pcs|piece|pieces|packet|packets|box|boxes|bottle|bottles|tin|tins|can|cans)', text)
         if matches:
             return float(matches[0])
-        # Try finding any number
         matches = re.findall(r'(\d+\.?\d*)', text)
         if matches:
             return float(matches[0])
@@ -242,9 +266,7 @@ For list_all: set action to "list_all".
     def _extract_unit(self, text: str) -> str:
         """Extract unit from text."""
         for unit in UNITS:
-            # Match as whole word
             if re.search(rf'\b{unit}\b', text):
-                # Normalize
                 if unit in ["gram", "grams"]:
                     return "g"
                 if unit in ["litre", "liters", "liter", "litres"]:
@@ -266,23 +288,19 @@ For list_all: set action to "list_all".
 
     def _extract_item_name(self, text: str, action: str, quantity: float, unit: str) -> str:
         """Extract item name from text."""
-        # Remove action keywords
         text_clean = text
         for kw in MOVEMENT_KEYWORDS.get(action, []):
             text_clean = text_clean.replace(kw, "")
 
-        # Remove quantity and unit
         text_clean = re.sub(rf'{quantity}\s*{unit}', '', text_clean)
         text_clean = re.sub(r'\d+\.?\d*', '', text_clean)
 
-        # Remove purpose text (everything after "for" for 'used' action)
         if action == "used":
             for p in [" for ", " to make ", " to prepare ", " in "]:
                 if p in text_clean:
                     text_clean = text_clean.split(p, 1)[0]
                     break
 
-        # Remove common filler words
         text_clean = re.sub(r'\b(kg|g|l|ml|pcs|of|the|a|an|and|with|from|to)\b', '', text_clean)
         text_clean = text_clean.strip()
 
@@ -290,16 +308,12 @@ For list_all: set action to "list_all".
 
     def _extract_purpose(self, text: str) -> str:
         """Extract purpose from text (for 'used' action)."""
-        purpose_keywords = [
-            "for", "to make", "to prepare", "in"
-        ]
+        purpose_keywords = ["for", "to make", "to prepare", "in"]
         for pk in purpose_keywords:
             if pk in text:
-                # Get text after the purpose keyword
                 parts = text.split(pk, 1)
                 if len(parts) > 1:
                     purpose = parts[1].strip()
-                    # Remove trailing punctuation
                     purpose = re.sub(r'[.,;!?].*', '', purpose).strip()
                     return purpose
         return ""
@@ -309,13 +323,11 @@ For list_all: set action to "list_all".
         Parse natural language text into structured actions.
         Tries Gemini first, falls back to rule-based parser.
         """
-        # Try Gemini first
         if self.enabled:
             success, actions = self.parse_with_gemini(text)
             if success and actions:
                 return True, actions
 
-        # Fallback to rule-based
         return self.parse_with_fallback(text)
 
     def format_for_confirmation(self, actions: list) -> str:
@@ -324,6 +336,8 @@ For list_all: set action to "list_all".
         for i, action in enumerate(actions, 1):
             if action.action in ["check", "low stock", "list"]:
                 lines.append(f"{i}. {action.action.title()}: {action.item_name}")
+            elif action.action == "delete_item":
+                lines.append(f"{i}. *Delete Item*: {action.item_name} \u26a0\ufe0f (cannot be undone)")
             else:
                 lines.append(
                     f"{i}. *{action.action.title()}*: {action.quantity} {action.unit} of {action.item_name}"
