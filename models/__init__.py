@@ -1,6 +1,6 @@
 """
 Models module for Prometheus.
-Data models and validation schemas.
+Single source of truth for all data models.
 """
 
 from dataclasses import dataclass, field
@@ -70,7 +70,11 @@ class UndoEntry:
 
 @dataclass
 class ParsedAction:
-    """Represents a parsed action from AI or command input."""
+    """
+    Represents a parsed action from AI or command input.
+    All fields after action/item_name/quantity have defaults so callers
+    can omit them without getting a TypeError.
+    """
     action: str
     item_name: str
     quantity: float
@@ -79,4 +83,4 @@ class ParsedAction:
     destination: str = ""
     raw_input: str = ""
     confidence: float = 1.0
-    extra: Optional[Dict[str, Any]] = field(default_factory=dict)
+    extra: Dict[str, Any] = field(default_factory=dict)
