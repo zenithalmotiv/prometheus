@@ -10,8 +10,8 @@ openpyxl==3.1.2
 # HTTP client — must be 0.25.x (python-telegram-bot 20.7 requires httpx~=0.25.2)
 httpx==0.25.2
 
-# Async HTTP (used by python-telegram-bot internally)
-aiohttp==3.9.1
+# Async HTTP (used by python-telegram-bot internally) — 3.10+ has Python 3.14 wheels
+aiohttp==3.10.5
 
 # Timezone support for the IST daily-report scheduler
 pytz==2024.1
