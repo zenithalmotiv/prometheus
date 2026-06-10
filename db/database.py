@@ -880,18 +880,42 @@ def reset_day(performed_by: str = "") -> Tuple[bool, str]:
 # --- Bulk CSV Import ---
 
 def bulk_import_items(items_data: List[Dict[str, Any]]) -> Tuple[int, int, List[str]]:
-    """Import a list of item dicts. Handles both 'avg_daily_usage' and
-    'average_daily_usage' column names (seed_items.csv uses the long form)."""
+    """
+    Import a list of item dicts.
+    Only item_name is required. item_id is auto-generated if missing.
+    All other fields are optional with safe defaults.
+    Accepts both 'avg_daily_usage' and 'average_daily_usage' column names.
+    """
     success = failed = 0
     errors: List[str] = []
 
+    # Pre-fetch existing IDs to avoid collisions during this batch
+    with get_connection() as _conn:
+        existing_ids = {
+            row[0] for row in _conn.execute("SELECT item_id FROM items").fetchall()
+        }
+
     for idx, row in enumerate(items_data, 1):
-        item_id   = str(row.get("item_id",   "")).strip()
+        # Normalise keys: strip whitespace from column names and values
+        row = {k.strip(): (v.strip() if isinstance(v, str) else v) for k, v in row.items()}
+
         item_name = str(row.get("item_name", "")).strip()
-        if not item_id or not item_name:
+        if not item_name:
             failed += 1
-            errors.append(f"Row {idx}: Missing item_id or item_name")
+            errors.append(f"Row {idx}: item_name is required")
             continue
+
+        # Auto-generate item_id if not provided or empty
+        item_id = str(row.get("item_id", "")).strip()
+        if not item_id:
+            prefix = item_name[:3].upper().replace(" ", "_")
+            candidate = prefix
+            counter = 1
+            while candidate in existing_ids:
+                candidate = f"{prefix}{counter:02d}"
+                counter += 1
+            item_id = candidate
+        existing_ids.add(item_id)
 
         # Accept either column name for avg daily usage
         avg_raw = row.get("avg_daily_usage") or row.get("average_daily_usage") or 0

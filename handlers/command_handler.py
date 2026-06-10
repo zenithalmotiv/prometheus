@@ -705,9 +705,18 @@ async def bulk_import_command(update: Update, context: ContextTypes.DEFAULT_TYPE
         return
 
     await update.message.reply_text(
-        "Send a CSV file or paste CSV content.\n"
-        "Required columns: item_id, item_name, unit\n"
-        "Optional: starting_stock, current_stock, avg_daily_usage, location, category",
+        "Send a CSV file or paste CSV content.\n\n"
+        "*Only* `item_name` *is required.*\n"
+        "Everything else is optional:\n"
+        "- `item_id` — auto-generated from first 3 letters if not provided\n"
+        "- `unit` — defaults to `pcs`\n"
+        "- `starting_stock`, `current_stock` — default to `0`\n"
+        "- `avg_daily_usage` — default to `0`\n"
+        "- `location`, `category` — optional, can be empty\n\n"
+        "Minimal example:\n"
+        "`item_name`\n"
+        "`Rice`\n"
+        "`Chicken`",
         parse_mode="Markdown"
     )
     context.user_data["awaiting"] = "bulk_import"
