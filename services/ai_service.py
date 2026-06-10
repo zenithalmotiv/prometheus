@@ -5,18 +5,21 @@ Converts conversational input into structured inventory actions.
 """
 
 import json
+import logging
 import re
 from typing import Optional, Tuple
 
 from app.config import config
 from models import ParsedAction
 
+logger = logging.getLogger(__name__)
 
 try:
     import google.generativeai as genai
     GEMINI_AVAILABLE = True
 except ImportError:
     GEMINI_AVAILABLE = False
+    logger.warning("google-generativeai not installed. Gemini disabled.")
 
 # ---------------------------------------------------------------------------
 # Fallback rule-based keyword map
@@ -66,7 +69,6 @@ NO_QTY_ACTIONS = {
     "zero_stock", "export_csv", "export_excel", "undo", "backup", "reset_day"
 }
 
-# Keywords that signal an add_item sentence — don't split these on "and"
 ADD_ITEM_TRIGGERS = ["add item", "add new item", "new item", "create item", "add a new", "add to inventory"]
 
 
@@ -79,8 +81,15 @@ class AIService:
             try:
                 genai.configure(api_key=config.GEMINI_API_KEY)
                 self.model = genai.GenerativeModel("gemini-1.5-flash")
-            except Exception:
+                logger.info("Gemini AI enabled and model loaded.")
+            except Exception as e:
+                logger.error(f"Failed to initialise Gemini: {e}")
                 self.enabled = False
+        else:
+            if not config.GEMINI_API_KEY:
+                logger.warning("GEMINI_API_KEY not set in .env — running in fallback (rule-based) mode only.")
+            elif not GEMINI_AVAILABLE:
+                logger.warning("google-generativeai package not installed — running in fallback mode.")
 
     def _build_system_prompt(self) -> str:
         return """You are Prometheus, a canteen inventory management assistant.
@@ -118,21 +127,22 @@ Admin:
   reset_day      - reset the day
 
 RULES:
-- For add_item: extract item_name, unit, starting_stock (as quantity), avg_daily_usage
+- For add_item: extract item_name, unit, starting_stock (as quantity), avg_daily_usage.
+  The WHOLE sentence is ONE add_item action even if it contains "and".
   Example: "add item rice with 150 kg in starting and current stock with average use of 40 kg"
   -> action=add_item, item_name=rice, unit=kg, quantity=150, avg_daily_usage=40
-- The WHOLE sentence is ONE add_item action even if it contains "and"
 - For stock_adjust: quantity is the NEW stock value
 - For set_avg: quantity is the new average usage value
 - For check_stock: item_name is required
 - If uncertain, set confidence below 0.7 and explain in note
-- Multiple items in one message -> return array of actions
+- Multiple DIFFERENT items = return array of actions
 - "give me the excel", "send excel", "export excel" -> export_excel
 - "give me the list", "show all items", "item list" -> list_all
 - "daily report", "today report" -> daily_report
 - "low stock", "running low" -> low_stock
+- NEVER return an empty actions array. Always parse something.
 
-Respond ONLY with valid JSON:
+Respond ONLY with valid JSON (no markdown, no explanation):
 {
     "actions": [
         {
@@ -155,6 +165,7 @@ Respond ONLY with valid JSON:
             return False, []
 
         try:
+            logger.info(f"Sending to Gemini: {text!r}")
             prompt = self._build_system_prompt()
             response = self.model.generate_content(
                 f"{prompt}\n\nUser request: {text}",
@@ -164,6 +175,8 @@ Respond ONLY with valid JSON:
                 )
             )
             response_text = response.text.strip()
+            logger.info(f"Gemini response: {response_text[:300]}")
+
             if "```json" in response_text:
                 response_text = response_text.split("```json")[1].split("```")[0].strip()
             elif "```" in response_text:
@@ -213,23 +226,24 @@ Respond ONLY with valid JSON:
                     extra={"avg_daily_usage": float(a.get("avg_daily_usage", 0) or 0)},
                 ))
 
+            logger.info(f"Gemini parsed {len(parsed_actions)} action(s).")
             return True, parsed_actions
 
         except Exception as e:
-            return False, [str(e)]
+            logger.error(f"Gemini parse error: {e}")
+            return False, []
 
     def parse_with_fallback(self, text: str) -> Tuple[bool, list]:
+        logger.info(f"Using fallback (rule-based) parser for: {text!r}")
         text_lower = text.lower().strip()
         actions = []
 
-        # If this is an add_item sentence, parse the WHOLE thing — never split on "and"
         if any(trigger in text_lower for trigger in ADD_ITEM_TRIGGERS):
             action = self._parse_single_action(text_lower, text_lower)
             if action:
                 return True, [action]
             return False, []
 
-        # For everything else, split on " and " or "," to handle multi-action sentences
         parts = re.split(r'\s+and\s+|\s*,\s*', text_lower)
         for part in parts:
             action = self._parse_single_action(part, text_lower)
@@ -340,26 +354,15 @@ Respond ONLY with valid JSON:
         )
 
     def _parse_add_item(self, text: str, raw: str) -> Optional[ParsedAction]:
-        """Extract add_item fields from natural language.
-
-        Handles sentences like:
-          'add item rice with 150kg in starting and current stock with average use of 40kg'
-          'add item sugar 50 kg avg 20 kg'
-          'add new item oil unit litre starting 100 avg 30'
-        """
         unit = self._extract_unit(text)
 
-        # ---- Extract starting_stock ----
-        # Look for a number near context words: starting, current, stock, with
         starting_stock = 0.0
         avg_daily_usage = 0.0
 
-        # Pattern: number [unit] near "starting" or "current"
         stock_match = re.search(
             r'(?:starting|current|stock|with)\s+(?:stock\s+)?(?:of\s+)?(\d+\.?\d*)\s*(?:kg|g|l|ml|pcs|piece|pieces|packet|packets|box|boxes|bottle|bottles|tin|tins|can|cans|gram|grams|litre|liter|litres)?',
             text
         )
-        # Also try: number [unit] followed by "in starting" or "as starting"
         stock_match2 = re.search(
             r'(\d+\.?\d*)\s*(?:kg|g|l|ml|pcs|piece|packet|box|bottle|tin|can|gram|grams|litre|liter)?\s*(?:in\s+)?(?:starting|current)',
             text
@@ -370,7 +373,6 @@ Respond ONLY with valid JSON:
         elif stock_match2:
             starting_stock = float(stock_match2.group(1))
 
-        # ---- Extract avg_daily_usage ----
         avg_match = re.search(
             r'(?:average|avg|average use|avg use|average usage|avg usage|use of|usage of)\s+(?:of\s+)?(\d+\.?\d*)\s*(?:kg|g|l|ml|pcs|piece|pieces|packet|packets|box|boxes|bottle|bottles|tin|tins|can|cans|gram|grams|litre|liter|litres)?',
             text
@@ -378,7 +380,6 @@ Respond ONLY with valid JSON:
         if avg_match:
             avg_daily_usage = float(avg_match.group(1))
 
-        # Fallback: if we still have nothing, just grab all numbers in order
         if starting_stock == 0.0:
             nums = re.findall(r'(\d+\.?\d*)', text)
             if nums:
@@ -386,23 +387,17 @@ Respond ONLY with valid JSON:
             if avg_daily_usage == 0.0 and len(nums) > 1:
                 avg_daily_usage = float(nums[1])
 
-        # ---- Extract item name ----
         name = text
-        # Remove action keywords
         for kw in ADD_ITEM_TRIGGERS:
             name = name.replace(kw, "")
-        # Remove numbers
         name = re.sub(r'\d+\.?\d*', '', name)
-        # Remove units
         for u in UNITS:
             name = re.sub(rf'\b{u}\b', '', name)
-        # Remove filler words
         filler = (
             r'\b(with|starting|current|stock|average|avg|use|usage|daily|'
             r'a|an|the|and|for|of|in|as|unit|is|are|its|into|to)\b'
         )
         name = re.sub(filler, '', name).strip()
-        # Collapse spaces
         name = re.sub(r'\s+', ' ', name).strip()
 
         if not name:
@@ -496,6 +491,7 @@ Respond ONLY with valid JSON:
             success, actions = self.parse_with_gemini(text)
             if success and actions:
                 return True, actions
+            logger.warning("Gemini returned no actions, falling back to rule-based parser.")
         return self.parse_with_fallback(text)
 
     def format_for_confirmation(self, actions: list) -> str:
