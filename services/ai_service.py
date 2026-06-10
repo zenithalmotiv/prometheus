@@ -1,18 +1,18 @@
 """
 AI Service for Prometheus.
 Handles natural language understanding using Gemini API.
-Uses direct httpx REST calls - no google-generativeai package needed.
+Uses direct httpx REST calls — no google-generativeai package needed.
 """
 
 import json
 import logging
 import re
-from typing import Optional, Tuple
+from typing import Optional, Tuple, List
 
 import httpx
 
 from app.config import config
-from models import ParsedAction
+from models import ParsedAction          # models package, not root models.py
 
 logger = logging.getLogger(__name__)
 
@@ -25,52 +25,63 @@ GEMINI_URL = (
 # Fallback rule-based keyword map
 # ---------------------------------------------------------------------------
 MOVEMENT_KEYWORDS = {
-    "used":           ["used", "use", "consumed", "ate", "cooked", "took", "spent"],
-    "purchased":      ["purchased", "bought", "buy", "ordered", "received", "got", "purchase"],
-    "damaged":        ["damaged", "spoiled", "broken", "wasted", "rotten", "bad", "expired"],
-    "wipro in":       ["wipro in", "wipro received", "received from wipro"],
-    "wipro out":      ["wipro out", "sent to wipro", "wipro sent"],
-    "rajagiri main":  ["rajagiri main", "sent to rajagiri", "rajagiri canteen", "rajagiri"],
-    "woods":          ["woods", "sent to woods"],
-    "garden cafe":    ["garden cafe", "sent to garden cafe", "garden"],
-    "bba canteen":    ["bba canteen", "sent to bba canteen"],
-    "bba tea counter":["bba tea counter", "bba tea", "sent to bba tea"],
-    "check":          ["check", "tell me about", "what is the stock", "how much", "stock of", "how many"],
-    "low_stock":      ["low stock", "what to order", "what should i buy", "running low", "low items"],
-    "order_list":     ["order list", "need to order", "items to order"],
-    "daily_report":   ["daily report", "today report", "report", "today's report", "todays report"],
-    "list":           ["list all", "show all", "inventory list", "all items", "item list", "list items",
-                       "give me the list", "show me the list", "show items", "show list"],
-    "zero_stock":     ["zero stock", "out of stock", "empty stock", "no stock"],
-    "export_csv":     ["export csv", "give me csv", "download csv", "get csv", "csv export",
-                       "send csv", "export as csv", "give me the csv"],
-    "export_excel":   ["export excel", "give me excel", "download excel", "get excel", "excel export",
-                       "send excel", "export as excel", "give me the excel", "xlsx"],
-    "add_item":       ["add item", "new item", "add new item", "create item", "add a new",
-                       "add to inventory"],
-    "delete_item":    ["delete", "remove", "delete item", "remove item", "get rid of", "drop item"],
-    "set_avg":        ["set average", "set avg", "average usage", "avg usage", "daily usage"],
-    "set_unit":       ["set unit", "change unit", "unit is"],
-    "undo":           ["undo", "undo last", "revert", "take back", "cancel last"],
-    "backup":         ["backup", "create backup", "make backup", "save backup"],
-    "reset_day":      ["reset day", "reset today", "new day"],
-    "stock_adjust":   ["adjust stock", "set stock to", "stock adjustment", "correct stock",
-                       "change stock to", "update stock"],
+    "used":            ["used", "use", "consumed", "ate", "cooked", "took", "spent"],
+    "purchased":       ["purchased", "bought", "buy", "ordered", "received", "got", "purchase"],
+    "damaged":         ["damaged", "spoiled", "broken", "wasted", "rotten", "bad", "expired"],
+    "wipro in":        ["wipro in", "wipro received", "received from wipro"],
+    "wipro out":       ["wipro out", "sent to wipro", "wipro sent"],
+    "rajagiri main":   ["rajagiri main", "sent to rajagiri", "rajagiri canteen", "rajagiri"],
+    "woods":           ["woods", "sent to woods"],
+    "garden cafe":     ["garden cafe", "sent to garden cafe", "garden"],
+    "bba canteen":     ["bba canteen", "sent to bba canteen"],
+    "bba tea counter": ["bba tea counter", "bba tea", "sent to bba tea"],
+    "check":           ["check", "tell me about", "what is the stock", "how much", "stock of", "how many"],
+    "low_stock":       ["low stock", "what to order", "what should i buy", "running low", "low items"],
+    "order_list":      ["order list", "need to order", "items to order"],
+    "daily_report":    ["daily report", "today report", "report", "today's report", "todays report"],
+    "list":            [
+        "list all", "show all", "inventory list", "all items", "item list",
+        "list items", "give me the list", "show me the list", "show items", "show list",
+    ],
+    "zero_stock":      ["zero stock", "out of stock", "empty stock", "no stock"],
+    "export_csv":      [
+        "export csv", "give me csv", "download csv", "get csv", "csv export",
+        "send csv", "export as csv", "give me the csv",
+    ],
+    "export_excel":    [
+        "export excel", "give me excel", "download excel", "get excel", "excel export",
+        "send excel", "export as excel", "give me the excel", "xlsx",
+    ],
+    "add_item":        ["add item", "new item", "add new item", "create item", "add a new", "add to inventory"],
+    "delete_item":     ["delete", "remove", "delete item", "remove item", "get rid of", "drop item"],
+    "set_avg":         ["set average", "set avg", "average usage", "avg usage", "daily usage"],
+    "set_unit":        ["set unit", "change unit", "unit is"],
+    "undo":            ["undo", "undo last", "revert", "take back", "cancel last"],
+    "backup":          ["backup", "create backup", "make backup", "save backup"],
+    "reset_day":       ["reset day", "reset today", "new day"],
+    "stock_adjust":    [
+        "adjust stock", "set stock to", "stock adjustment", "correct stock",
+        "change stock to", "update stock",
+    ],
 }
 
 UNITS = [
     "kg", "g", "gram", "grams", "l", "litre", "liter", "litres", "ml",
     "pcs", "piece", "pieces", "packet", "packets", "box", "boxes",
-    "bottle", "bottles", "tin", "tins", "can", "cans"
+    "bottle", "bottles", "tin", "tins", "can", "cans",
 ]
 
-NO_QTY_ACTIONS = {
+# Actions that need no quantity (read-only or admin triggers)
+NO_QTY_ACTIONS = frozenset({
     "check", "low_stock", "order_list", "daily_report", "list",
-    "zero_stock", "export_csv", "export_excel", "undo", "backup", "reset_day"
-}
+    "zero_stock", "export_csv", "export_excel", "undo", "backup", "reset_day",
+})
 
-ADD_ITEM_TRIGGERS = ["add item", "add new item", "new item", "create item", "add a new", "add to inventory"]
+ADD_ITEM_TRIGGERS = [
+    "add item", "add new item", "new item", "create item", "add a new", "add to inventory",
+]
 
+# Map Gemini action strings -> internal action strings
 ACTION_MAP = {
     "wipro_in":        "wipro in",
     "wipro_out":       "wipro out",
@@ -102,9 +113,13 @@ class AIService:
     def __init__(self):
         self.enabled = bool(config.GEMINI_API_KEY)
         if self.enabled:
-            print("[Prometheus] Gemini AI enabled (gemini-2.0-flash, httpx REST mode).")
+            print("[Prometheus] Gemini AI enabled (gemini-2.0-flash, httpx REST).")
         else:
-            print("[Prometheus] WARNING: GEMINI_API_KEY not set — fallback mode only.")
+            print("[Prometheus] GEMINI_API_KEY not set — rule-based fallback only.")
+
+    # ------------------------------------------------------------------
+    # Gemini REST caller
+    # ------------------------------------------------------------------
 
     def _build_system_prompt(self) -> str:
         return """You are Prometheus, a canteen inventory management assistant.
@@ -130,11 +145,11 @@ Exports:
   export_excel   - export inventory as Excel file
 
 Item management:
-  add_item       - add a new item (need item_name, unit, starting_stock, current_stock, avg_daily_usage)
-  delete_item    - delete an item (need item_name)
-  set_avg        - set average daily usage (need item_name + quantity)
-  set_unit       - set unit for an item (need item_name + unit)
-  stock_adjust   - adjust/correct current stock to a specific value (need item_name + quantity)
+  add_item       - add a new item (item_name, unit, starting_stock, avg_daily_usage)
+  delete_item    - delete an item (item_name)
+  set_avg        - set average daily usage (item_name + quantity)
+  set_unit       - set unit for an item (item_name + unit)
+  stock_adjust   - set current stock to an exact value (item_name + quantity)
 
 Admin:
   undo           - undo last action
@@ -142,16 +157,12 @@ Admin:
   reset_day      - reset the day
 
 RULES:
-- For add_item: extract item_name, unit, starting_stock (as quantity), avg_daily_usage.
-  The WHOLE sentence is ONE add_item action even if it contains "and".
-  Example: "add item rice with 150 kg in starting and current stock with average use of 40 kg"
-  -> action=add_item, item_name=rice, unit=kg, quantity=150, avg_daily_usage=40
-- For stock_adjust: quantity is the NEW stock value
-- For set_avg: quantity is the new average usage value
-- For check_stock: item_name is required
-- If uncertain, set confidence below 0.7 and explain in note
-- Multiple DIFFERENT items = return array of actions
-- NEVER return an empty actions array. Always parse something.
+- For add_item: one action even if the sentence contains "and".
+- For stock_adjust: quantity is the NEW absolute stock value.
+- For set_avg: quantity is the new daily usage value.
+- For check_stock: item_name is required.
+- Multiple DIFFERENT items -> return an array of actions.
+- NEVER return an empty actions array.
 
 Respond ONLY with valid JSON (no markdown, no explanation):
 {
@@ -171,27 +182,18 @@ Respond ONLY with valid JSON (no markdown, no explanation):
 }
 """
 
-    async def parse_with_gemini(self, text: str) -> Tuple[bool, list]:
-        """Call Gemini REST API directly using httpx (no SDK needed)."""
+    async def parse_with_gemini(self, text: str) -> Tuple[bool, List[ParsedAction]]:
+        """Call Gemini via httpx and return parsed actions."""
         if not self.enabled:
             return False, []
 
         payload = {
-            "contents": [
-                {
-                    "parts": [
-                        {"text": self._build_system_prompt() + f"\n\nUser request: {text}"}
-                    ]
-                }
-            ],
-            "generationConfig": {
-                "temperature": 0.1,
-                "maxOutputTokens": 2048,
-            },
+            "contents": [{"parts": [{"text": self._build_system_prompt() + f"\n\nUser request: {text}"}]}],
+            "generationConfig": {"temperature": 0.1, "maxOutputTokens": 2048},
         }
 
         try:
-            logger.info(f"Sending to Gemini (httpx): {text!r}")
+            logger.info(f"Sending to Gemini: {text!r}")
             async with httpx.AsyncClient(timeout=15.0) as client:
                 resp = await client.post(
                     GEMINI_URL,
@@ -204,24 +206,25 @@ Respond ONLY with valid JSON (no markdown, no explanation):
                 return False, []
 
             data = resp.json()
-            response_text = (
+            raw_text = (
                 data.get("candidates", [{}])[0]
                     .get("content", {})
                     .get("parts", [{}])[0]
                     .get("text", "")
                     .strip()
             )
-            logger.info(f"Gemini response: {response_text[:300]}")
+            logger.info(f"Gemini response: {raw_text[:300]}")
 
-            if "```json" in response_text:
-                response_text = response_text.split("```json")[1].split("```")[0].strip()
-            elif "```" in response_text:
-                response_text = response_text.split("```")[1].split("```")[0].strip()
+            # Strip optional markdown code fences
+            if "```json" in raw_text:
+                raw_text = raw_text.split("```json")[1].split("```")[0].strip()
+            elif "```" in raw_text:
+                raw_text = raw_text.split("```")[1].split("```")[0].strip()
 
-            parsed = json.loads(response_text)
-            actions_raw = parsed.get("actions", [])
+            parsed_json = json.loads(raw_text)
+            actions_raw = parsed_json.get("actions", [])
 
-            parsed_actions = []
+            parsed_actions: List[ParsedAction] = []
             for a in actions_raw:
                 raw_action = a.get("action", "").lower().replace(" ", "_").replace("-", "_")
                 action = ACTION_MAP.get(raw_action, raw_action)
@@ -238,131 +241,139 @@ Respond ONLY with valid JSON (no markdown, no explanation):
                 ))
 
             logger.info(f"Gemini parsed {len(parsed_actions)} action(s).")
-            return True, parsed_actions
+            return bool(parsed_actions), parsed_actions
 
         except Exception as e:
             logger.error(f"Gemini parse error: {e}")
             return False, []
 
-    def parse_with_fallback(self, text: str) -> Tuple[bool, list]:
-        logger.info(f"Using fallback (rule-based) parser for: {text!r}")
+    # ------------------------------------------------------------------
+    # Rule-based fallback parser
+    # ------------------------------------------------------------------
+
+    def parse_with_fallback(self, text: str) -> Tuple[bool, List[ParsedAction]]:
+        logger.info(f"Fallback parser: {text!r}")
         text_lower = text.lower().strip()
-        actions = []
+        actions: List[ParsedAction] = []
 
-        if any(trigger in text_lower for trigger in ADD_ITEM_TRIGGERS):
+        # add_item must be handled whole (not split on "and")
+        if any(t in text_lower for t in ADD_ITEM_TRIGGERS):
             action = self._parse_single_action(text_lower, text_lower)
-            if action:
-                return True, [action]
-            return False, []
+            return (True, [action]) if action else (False, [])
 
+        # Split on " and " / "," for multi-item sentences
         parts = re.split(r'\s+and\s+|\s*,\s*', text_lower)
         for part in parts:
             action = self._parse_single_action(part, text_lower)
             if action:
                 actions.append(action)
 
-        return len(actions) > 0, actions
+        return bool(actions), actions
 
-    async def parse(self, text: str) -> Tuple[bool, list]:
-        """Try Gemini first, fall back to rule-based if it fails."""
+    async def parse(self, text: str) -> Tuple[bool, List[ParsedAction]]:
+        """Try Gemini first; fall back to rule-based parser on failure."""
         if self.enabled:
             success, actions = await self.parse_with_gemini(text)
             if success and actions:
                 return True, actions
-            logger.warning("Gemini returned no actions, falling back to rule-based parser.")
+            logger.warning("Gemini failed or returned nothing — using fallback parser.")
         return self.parse_with_fallback(text)
 
     # ------------------------------------------------------------------
-    # Rule-based parser helpers
+    # Rule-based helpers
     # ------------------------------------------------------------------
 
     def _parse_single_action(self, text: str, full_text: str = "") -> Optional[ParsedAction]:
         text_lower = text.lower().strip()
-        src = full_text or text_lower
+        src = full_text.lower() if full_text else text_lower
 
-        detected_action = None
-        for action, keywords in sorted(MOVEMENT_KEYWORDS.items(), key=lambda x: -max(len(k) for k in x[1])):
+        # Detect action by longest keyword match first
+        detected: Optional[str] = None
+        for action, keywords in sorted(
+            MOVEMENT_KEYWORDS.items(), key=lambda x: -max(len(k) for k in x[1])
+        ):
             for kw in keywords:
                 if kw in src:
-                    detected_action = action
+                    detected = action
                     break
-            if detected_action:
+            if detected:
                 break
 
-        if not detected_action:
+        if not detected:
             return None
 
-        if detected_action in NO_QTY_ACTIONS:
-            item_name = ""
-            if detected_action == "check":
-                item_name = self._extract_item_name_simple(src, detected_action)
+        # -- No-quantity actions --
+        if detected in NO_QTY_ACTIONS:
+            item_name = self._extract_item_name_simple(src, detected) if detected == "check" else ""
             return ParsedAction(
-                action=detected_action, item_name=item_name,
-                quantity=0, unit="", purpose="", destination="",
-                raw_input=text, confidence=0.75,
+                action=detected, item_name=item_name,
+                quantity=0, raw_input=text, confidence=0.75,
             )
 
-        if detected_action == "delete_item":
+        if detected == "delete_item":
             return ParsedAction(
                 action="delete_item",
                 item_name=self._extract_item_name_for_delete(src),
-                quantity=0, unit="", purpose="", destination="",
-                raw_input=text, confidence=0.85,
+                quantity=0, raw_input=text, confidence=0.85,
             )
 
-        if detected_action == "add_item":
+        if detected == "add_item":
             return self._parse_add_item(src, text)
 
-        if detected_action == "set_avg":
+        if detected == "set_avg":
             return ParsedAction(
                 action="set_avg",
-                item_name=self._extract_item_name_simple(src, detected_action),
-                quantity=self._extract_quantity(src), unit="",
-                purpose="", destination="", raw_input=text, confidence=0.75,
+                item_name=self._extract_item_name_simple(src, detected),
+                quantity=self._extract_quantity(src),
+                raw_input=text, confidence=0.75,
             )
 
-        if detected_action == "set_unit":
+        if detected == "set_unit":
             return ParsedAction(
                 action="set_unit",
-                item_name=self._extract_item_name_simple(src, detected_action),
+                item_name=self._extract_item_name_simple(src, detected),
                 quantity=0, unit=self._extract_unit(src),
-                purpose="", destination="", raw_input=text, confidence=0.75,
+                raw_input=text, confidence=0.75,
             )
 
-        if detected_action == "stock_adjust":
+        if detected == "stock_adjust":
             return ParsedAction(
                 action="stock_adjust",
-                item_name=self._extract_item_name_simple(src, detected_action),
-                quantity=self._extract_quantity(src), unit="",
-                purpose="", destination="", raw_input=text, confidence=0.75,
+                item_name=self._extract_item_name_simple(src, detected),
+                quantity=self._extract_quantity(src),
+                raw_input=text, confidence=0.75,
             )
 
-        if detected_action in ("undo", "backup", "reset_day"):
+        if detected in ("undo", "backup", "reset_day"):
             return ParsedAction(
-                action=detected_action, item_name="", quantity=0, unit="",
-                purpose="", destination="", raw_input=text, confidence=0.8,
+                action=detected, item_name="", quantity=0,
+                raw_input=text, confidence=0.8,
             )
 
-        quantity = self._extract_quantity(src)
-        unit = self._extract_unit(src)
-        item_name = self._extract_item_name(src, detected_action, quantity, unit)
-        purpose = self._extract_purpose(src) if detected_action == "used" else ""
-        destination = detected_action if detected_action in [
-            "rajagiri main", "woods", "garden cafe", "bba canteen", "bba tea counter"
-        ] else ""
+        # -- Movement actions --
+        quantity  = self._extract_quantity(src)
+        unit      = self._extract_unit(src)
+        item_name = self._extract_item_name(src, detected, quantity, unit)
+        purpose   = self._extract_purpose(src) if detected == "used" else ""
+        destination = (
+            detected
+            if detected in {"rajagiri main", "woods", "garden cafe", "bba canteen", "bba tea counter"}
+            else ""
+        )
 
-        if detected_action == "check":
+        if detected == "check":
             return ParsedAction(
-                action="check", item_name=item_name, quantity=0, unit=unit,
-                purpose="", destination="", raw_input=text, confidence=0.7,
+                action="check", item_name=item_name, quantity=0,
+                raw_input=text, confidence=0.7,
             )
 
         if not item_name or quantity <= 0:
             return None
 
         return ParsedAction(
-            action=detected_action, item_name=item_name, quantity=quantity, unit=unit,
-            purpose=purpose, destination=destination, raw_input=text, confidence=0.7,
+            action=detected, item_name=item_name, quantity=quantity, unit=unit,
+            purpose=purpose, destination=destination,
+            raw_input=text, confidence=0.7,
         )
 
     def _parse_add_item(self, text: str, raw: str) -> Optional[ParsedAction]:
@@ -371,13 +382,11 @@ Respond ONLY with valid JSON (no markdown, no explanation):
         avg_daily_usage = 0.0
 
         stock_match = re.search(
-            r'(?:starting|current|stock|with)\s+(?:stock\s+)?(?:of\s+)?(\d+\.?\d*)'
-            r'\s*(?:kg|g|l|ml|pcs|piece|pieces|packet|packets|box|boxes|bottle|bottles|tin|tins|can|cans|gram|grams|litre|liter|litres)?',
+            r'(?:starting|current|stock|with)\s+(?:stock\s+)?(?:of\s+)?(\d+\.?\d*)',
             text
         )
         stock_match2 = re.search(
-            r'(\d+\.?\d*)\s*(?:kg|g|l|ml|pcs|piece|packet|box|bottle|tin|can|gram|grams|litre|liter)?'
-            r'\s*(?:in\s+)?(?:starting|current)',
+            r'(\d+\.?\d*)\s*(?:' + '|'.join(UNITS) + r')?\s*(?:in\s+)?(?:starting|current)',
             text
         )
         if stock_match:
@@ -386,8 +395,8 @@ Respond ONLY with valid JSON (no markdown, no explanation):
             starting_stock = float(stock_match2.group(1))
 
         avg_match = re.search(
-            r'(?:average|avg|average use|avg use|average usage|avg usage|use of|usage of)\s+(?:of\s+)?'
-            r'(\d+\.?\d*)\s*(?:kg|g|l|ml|pcs|piece|pieces|packet|packets|box|boxes|bottle|bottles|tin|tins|can|cans|gram|grams|litre|liter|litres)?',
+            r'(?:average|avg|average use|avg use|average usage|avg usage|use of|usage of)'
+            r'\s+(?:of\s+)?(\d+\.?\d*)',
             text
         )
         if avg_match:
@@ -405,7 +414,7 @@ Respond ONLY with valid JSON (no markdown, no explanation):
             name = name.replace(kw, "")
         name = re.sub(r'\d+\.?\d*', '', name)
         for u in UNITS:
-            name = re.sub(rf'\b{u}\b', '', name)
+            name = re.sub(rf'\b{re.escape(u)}\b', '', name)
         filler = (
             r'\b(with|starting|current|stock|average|avg|use|usage|daily|'
             r'a|an|the|and|for|of|in|as|unit|is|are|its|into|to)\b'
@@ -417,16 +426,16 @@ Respond ONLY with valid JSON (no markdown, no explanation):
             return None
 
         return ParsedAction(
-            action="add_item", item_name=name, quantity=starting_stock, unit=unit,
-            purpose="", destination="", raw_input=raw, confidence=0.80,
+            action="add_item", item_name=name,
+            quantity=starting_stock, unit=unit,
+            raw_input=raw, confidence=0.80,
             extra={"avg_daily_usage": avg_daily_usage},
         )
 
     def _extract_item_name_for_delete(self, text: str) -> str:
         for kw in MOVEMENT_KEYWORDS.get("delete_item", []):
             text = text.replace(kw, "")
-        text = re.sub(r'\b(the|item|a|an|please|from|inventory)\b', '', text)
-        return text.strip()
+        return re.sub(r'\b(the|item|a|an|please|from|inventory)\b', '', text).strip()
 
     def _extract_item_name_simple(self, text: str, action: str) -> str:
         result = text
@@ -434,53 +443,48 @@ Respond ONLY with valid JSON (no markdown, no explanation):
             result = result.replace(kw, "")
         result = re.sub(r'\d+\.?\d*', '', result)
         for u in UNITS:
-            result = re.sub(rf'\b{u}\b', '', result)
-        result = re.sub(r'\b(of|the|a|an|and|with|from|to)\b', '', result)
-        return result.strip()
+            result = re.sub(rf'\b{re.escape(u)}\b', '', result)
+        return re.sub(r'\b(of|the|a|an|and|with|from|to)\b', '', result).strip()
 
     def _extract_quantity(self, text: str) -> float:
-        matches = re.findall(
-            r'(\d+\.?\d*)\s*(?:kg|g|gram|grams|l|litre|liter|litres|ml|pcs|piece|pieces|packet|packets|box|boxes|bottle|bottles|tin|tins|can|cans)',
-            text
-        )
+        unit_pattern = '|'.join(re.escape(u) for u in UNITS)
+        matches = re.findall(rf'(\d+\.?\d*)\s*(?:{unit_pattern})', text)
         if matches:
             return float(matches[0])
-        matches = re.findall(r'(\d+\.?\d*)', text)
-        return float(matches[0]) if matches else 0
+        plain = re.findall(r'(\d+\.?\d*)', text)
+        return float(plain[0]) if plain else 0.0
 
     def _extract_unit(self, text: str) -> str:
+        norm = {
+            "gram": "g",   "grams": "g",
+            "litre": "L",  "liter": "L", "litres": "L", "liters": "L", "l": "L",
+            "piece": "pcs", "pieces": "pcs",
+            "packet": "packet", "packets": "packet",
+            "box": "box",   "boxes": "box",
+            "bottle": "bottle", "bottles": "bottle",
+            "tin": "tin",   "tins": "tin",
+            "can": "can",   "cans": "can",
+        }
         for unit in UNITS:
-            if re.search(rf'\b{unit}\b', text):
-                norm = {
-                    "gram": "g", "grams": "g",
-                    "litre": "L", "liter": "L", "litres": "L", "liters": "L",
-                    "piece": "pcs", "pieces": "pcs",
-                    "packet": "packet", "packets": "packet",
-                    "box": "box", "boxes": "box",
-                    "bottle": "bottle", "bottles": "bottle",
-                    "tin": "tin", "tins": "tin",
-                    "can": "can", "cans": "can",
-                }
+            if re.search(rf'\b{re.escape(unit)}\b', text):
                 return norm.get(unit, unit)
         return "pcs"
 
     def _extract_item_name(self, text: str, action: str, quantity: float, unit: str) -> str:
-        text_clean = text
+        cleaned = text
         for kw in MOVEMENT_KEYWORDS.get(action, []):
-            text_clean = text_clean.replace(kw, "")
+            cleaned = cleaned.replace(kw, "")
         if quantity:
-            text_clean = re.sub(
-                rf'{re.escape(str(int(quantity) if quantity == int(quantity) else quantity))}\s*{re.escape(unit)}',
-                '', text_clean
-            )
-        text_clean = re.sub(r'\d+\.?\d*', '', text_clean)
+            qty_str = str(int(quantity)) if quantity == int(quantity) else str(quantity)
+            cleaned = re.sub(rf'{re.escape(qty_str)}\s*{re.escape(unit)}', '', cleaned)
+        cleaned = re.sub(r'\d+\.?\d*', '', cleaned)
         if action == "used":
-            for p in [" for ", " to make ", " to prepare ", " in "]:
-                if p in text_clean:
-                    text_clean = text_clean.split(p, 1)[0]
+            for sep in [" for ", " to make ", " to prepare ", " in "]:
+                if sep in cleaned:
+                    cleaned = cleaned.split(sep, 1)[0]
                     break
-        text_clean = re.sub(r'\b(kg|g|l|ml|pcs|of|the|a|an|and|with|from|to)\b', '', text_clean)
-        return text_clean.strip()
+        cleaned = re.sub(r'\b(kg|g|l|ml|pcs|of|the|a|an|and|with|from|to)\b', '', cleaned)
+        return cleaned.strip()
 
     def _extract_purpose(self, text: str) -> str:
         for pk in ["for", "to make", "to prepare", "in"]:
@@ -491,19 +495,29 @@ Respond ONLY with valid JSON (no markdown, no explanation):
                     return re.sub(r'[.,;!?].*', '', purpose).strip()
         return ""
 
-    def format_for_confirmation(self, actions: list) -> str:
+    # ------------------------------------------------------------------
+    # Confirmation message formatter
+    # ------------------------------------------------------------------
+
+    def format_for_confirmation(self, actions: List[ParsedAction]) -> str:
         lines = ["Please confirm these actions:\n"]
+        labels = {
+            "export_csv":   "Export CSV",
+            "export_excel": "Export Excel",
+            "daily_report": "Daily Report",
+            "list":         "List All Items",
+            "low_stock":    "Show Low Stock",
+            "order_list":   "Show Order List",
+            "zero_stock":   "Show Zero Stock",
+            "undo":         "Undo Last Action",
+            "backup":       "Create Backup",
+            "reset_day":    "Reset Day",
+        }
         for i, action in enumerate(actions, 1):
             a = action.action
-            if a in NO_QTY_ACTIONS:
-                labels = {
-                    "export_csv": "Export CSV", "export_excel": "Export Excel",
-                    "daily_report": "Daily Report", "list": "List All Items",
-                    "low_stock": "Show Low Stock", "order_list": "Show Order List",
-                    "zero_stock": "Show Zero Stock", "undo": "Undo Last Action",
-                    "backup": "Create Backup", "reset_day": "Reset Day",
-                    "check": f"Check Stock: {action.item_name}",
-                }
+            if a == "check":
+                lines.append(f"{i}. Check Stock: {action.item_name}")
+            elif a in NO_QTY_ACTIONS:
                 lines.append(f"{i}. {labels.get(a, a.title())}")
             elif a == "delete_item":
                 lines.append(f"{i}. DELETE ITEM: {action.item_name} (cannot be undone!)")
@@ -528,7 +542,7 @@ Respond ONLY with valid JSON (no markdown, no explanation):
                     lines.append(f"   Purpose: {action.purpose}")
                 if action.destination:
                     lines.append(f"   Destination: {action.destination.title()}")
-        lines.append("\nReply with YES to confirm, or NO to cancel.")
+        lines.append("\nReply YES to confirm, or NO to cancel.")
         return "\n".join(lines)
 
 
