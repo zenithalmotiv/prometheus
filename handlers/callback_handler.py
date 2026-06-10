@@ -637,7 +637,6 @@ async def handle_item_action_callback(update: Update, context: ContextTypes.DEFA
         context.user_data["awaiting"] = "edit_item"
 
     elif data.startswith("del_"):
-        # FIX: strip prefix correctly and show one clean confirmation
         item_id = data[len("del_"):]
         session["temp_data"]["delete_item_id"] = item_id
         item = find_item(item_id)
@@ -797,14 +796,28 @@ async def handle_admin_callback(update: Update, context: ContextTypes.DEFAULT_TY
     elif action == "csv":
         ok, msg, filepath = do_export_csv()
         if ok and filepath:
-            await query.edit_message_text(f"{msg}\n`{filepath}`", parse_mode="Markdown")
+            # Send the file directly in chat so all users (including brother's phone) receive it
+            await query.edit_message_text("Exporting... sending file now.")
+            with open(filepath, "rb") as f:
+                await query.message.reply_document(
+                    document=f,
+                    filename=filepath.split("/")[-1],
+                    caption="📊 Inventory CSV Export"
+                )
         else:
             await query.edit_message_text(msg)
 
     elif action == "excel":
         ok, msg, filepath = do_export_excel()
         if ok and filepath:
-            await query.edit_message_text(f"{msg}\n`{filepath}`", parse_mode="Markdown")
+            # Send the file directly in chat so all users (including brother's phone) receive it
+            await query.edit_message_text("Exporting... sending file now.")
+            with open(filepath, "rb") as f:
+                await query.message.reply_document(
+                    document=f,
+                    filename=filepath.split("/")[-1],
+                    caption="📊 Inventory Excel Export"
+                )
         else:
             await query.edit_message_text(msg)
 

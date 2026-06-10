@@ -139,8 +139,8 @@ async def help_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
         "`/reset_day` - Reset day\n"
         "`/backup` - Create backup\n"
         "`/restore` - Restore backup\n"
-        "`/export_csv` - Export to CSV\n"
-        "`/export_excel` - Export to Excel\n\n"
+        "`/export_csv` - Export to CSV (sent as file)\n"
+        "`/export_excel` - Export to Excel (sent as file)\n\n"
         "*AI Mode:*\n"
         "Just type naturally!\n"
         "Example: 'used 5 kg rice for biriyani'\n\n"
@@ -184,7 +184,6 @@ async def used_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
         qty = float(args[0])
         unit = args[1]
 
-        # Find item and purpose
         remaining = " ".join(args[2:])
         purpose = ""
         if " for " in remaining:
@@ -596,25 +595,37 @@ async def restore_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
 
 async def export_csv_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """Handle /export_csv command."""
+    """Handle /export_csv command. Exports inventory and sends the file in chat."""
     if not await check_unlocked(update):
         return
 
     ok, msg, filepath = do_export_csv()
-    if ok:
-        await update.message.reply_text(f"{msg}\n`{filepath}`", parse_mode="Markdown")
+    if ok and filepath:
+        await update.message.reply_text("Exporting... sending file now.")
+        with open(filepath, "rb") as f:
+            await update.message.reply_document(
+                document=f,
+                filename=filepath.split("/")[-1],
+                caption="📊 Inventory CSV Export"
+            )
     else:
         await update.message.reply_text(msg)
 
 
 async def export_excel_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """Handle /export_excel command."""
+    """Handle /export_excel command. Exports inventory and sends the file in chat."""
     if not await check_unlocked(update):
         return
 
     ok, msg, filepath = do_export_excel()
-    if ok:
-        await update.message.reply_text(f"{msg}\n`{filepath}`", parse_mode="Markdown")
+    if ok and filepath:
+        await update.message.reply_text("Exporting... sending file now.")
+        with open(filepath, "rb") as f:
+            await update.message.reply_document(
+                document=f,
+                filename=filepath.split("/")[-1],
+                caption="📊 Inventory Excel Export"
+            )
     else:
         await update.message.reply_text(msg)
 
