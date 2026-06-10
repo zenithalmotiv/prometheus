@@ -38,10 +38,7 @@ def auto_item_id(item_name: str, existing_ids: list) -> str:
 
 
 def _looks_like_item_id(s: str) -> bool:
-    """Return True if the string looks like a custom item ID (e.g. R001, ITM1).
-    An ID has no spaces and matches the pattern: letters followed by digits.
-    A plain word like 'Rice' or 'Sugar' is NOT an ID.
-    """
+    """Return True if the string looks like a custom item ID (e.g. R001, ITM1)."""
     return bool(re.fullmatch(r'[A-Za-z]{1,5}\d+', s.strip()))
 
 
@@ -61,49 +58,34 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
     if awaiting == "movement_item":
         await handle_movement_item(update, context, text)
-
     elif awaiting == "movement_qty":
         await handle_movement_qty(update, context, text)
-
     elif awaiting == "custom_purpose":
         await handle_custom_purpose(update, context, text)
-
     elif awaiting == "check_stock":
         await handle_check_stock(update, context, text)
-
     elif awaiting == "add_item":
         await handle_add_item(update, context, text)
-
     elif awaiting == "add_multi":
         await handle_add_multiple(update, context, text)
-
     elif awaiting == "bulk_import":
         await handle_bulk_import_text(update, context, text)
-
     elif awaiting == "edit_item":
         await handle_edit_item(update, context, text)
-
     elif awaiting == "set_avg":
         await handle_set_avg(update, context, text)
-
     elif awaiting == "set_unit":
         await handle_set_unit(update, context, text)
-
     elif awaiting == "add_purpose":
         await handle_add_purpose(update, context, text)
-
     elif awaiting == "change_secret":
         await handle_change_secret(update, context, text)
-
     elif awaiting == "adjustment":
         await handle_adjustment(update, context, text)
-
     elif awaiting == "ai_confirm":
         await handle_ai_confirmation(update, context, text)
-
     elif awaiting == "restore_select":
         await handle_restore_select(update, context, text)
-
     else:
         await try_ai_mode(update, context, text)
 
@@ -230,10 +212,7 @@ async def handle_movement_qty(update: Update, context: ContextTypes.DEFAULT_TYPE
         performed_by=str(user_id),
     )
 
-    await update.message.reply_text(
-        msg,
-        reply_markup=main_menu_keyboard()
-    )
+    await update.message.reply_text(msg, reply_markup=main_menu_keyboard())
     context.user_data["awaiting"] = ""
 
 
@@ -261,23 +240,11 @@ async def handle_custom_purpose(update: Update, context: ContextTypes.DEFAULT_TY
 async def handle_check_stock(update: Update, context: ContextTypes.DEFAULT_TYPE, text: str):
     """Handle stock check request."""
     ok, msg = check_stock(text)
-    await update.message.reply_text(
-        msg,
-        parse_mode="Markdown",
-        reply_markup=main_menu_keyboard()
-    )
+    await update.message.reply_text(msg, parse_mode="Markdown", reply_markup=main_menu_keyboard())
 
 
 async def handle_add_item(update: Update, context: ContextTypes.DEFAULT_TYPE, text: str):
-    """Handle add single item input.
-
-    Accepts two formats:
-      Simple (auto-ID): Name | unit | stock | avg_usage
-      Full  (custom ID): ID | Name | unit | stock | current | avg_usage
-
-    Detection: if the first part looks like an item ID (letters+digits, e.g. R001)
-    we use full format. Otherwise we treat it as a name and auto-generate the ID.
-    """
+    """Handle add single item input."""
     parts = [p.strip() for p in text.split("|")]
     existing_ids = [it["item_id"] for it in get_all_items()]
 
@@ -291,7 +258,6 @@ async def handle_add_item(update: Update, context: ContextTypes.DEFAULT_TYPE, te
         return
 
     if _looks_like_item_id(parts[0]) and len(parts) >= 3:
-        # Full format: ID | name | unit | stock | current | avg
         item_id = parts[0]
         item_name = parts[1]
         unit = parts[2] if len(parts) > 2 else "pcs"
@@ -299,7 +265,6 @@ async def handle_add_item(update: Update, context: ContextTypes.DEFAULT_TYPE, te
         current_stock = float(parts[4]) if len(parts) > 4 else starting_stock
         avg_usage = float(parts[5]) if len(parts) > 5 else 0
     else:
-        # Simple format: name | unit | stock | avg_usage
         item_name = parts[0]
         unit = parts[1] if len(parts) > 1 else "pcs"
         starting_stock = float(parts[2]) if len(parts) > 2 else 0
@@ -323,7 +288,7 @@ async def handle_add_item(update: Update, context: ContextTypes.DEFAULT_TYPE, te
 
 
 async def handle_add_multiple(update: Update, context: ContextTypes.DEFAULT_TYPE, text: str):
-    """Handle multiple items input. ID is auto-generated unless a proper ID is given."""
+    """Handle multiple items input."""
     lines = text.strip().split("\n")
     items_data = []
     existing_ids = [it["item_id"] for it in get_all_items()]
@@ -337,7 +302,6 @@ async def handle_add_multiple(update: Update, context: ContextTypes.DEFAULT_TYPE
             continue
 
         if _looks_like_item_id(parts[0]) and len(parts) >= 3:
-            # Full format: id | name | unit | stock | current | avg
             item_id = parts[0]
             item_name = parts[1]
             unit = parts[2] if len(parts) > 2 else "pcs"
@@ -345,7 +309,6 @@ async def handle_add_multiple(update: Update, context: ContextTypes.DEFAULT_TYPE
             avg_usage = float(parts[5]) if len(parts) > 5 else 0
             existing_ids.append(item_id)
         else:
-            # Simple format: name | unit | stock | avg_usage
             item_name = parts[0]
             unit = parts[1] if len(parts) > 1 else "pcs"
             starting_stock = float(parts[2]) if len(parts) > 2 else 0
@@ -372,8 +335,7 @@ async def handle_add_multiple(update: Update, context: ContextTypes.DEFAULT_TYPE
     else:
         await update.message.reply_text(
             "No valid items found. Use format:\n"
-            "`Name | unit | stock | avg_usage`\n"
-            "Example:\n`Rice | kg | 150 | 40`\n`Sugar | kg | 50 | 20`",
+            "`Name | unit | stock | avg_usage`",
             parse_mode="Markdown"
         )
 
@@ -401,12 +363,11 @@ async def handle_edit_item(update: Update, context: ContextTypes.DEFAULT_TYPE, t
         key, value = text.split(":", 1)
         key = key.strip().lower()
         value = value.strip()
-
         if key in ("name", "item_name"):
             ok, msg = edit_item_details(item_id, item_name=value)
-        elif key in ("location",):
+        elif key == "location":
             ok, msg = edit_item_details(item_id, location=value)
-        elif key in ("category",):
+        elif key == "category":
             ok, msg = edit_item_details(item_id, category=value)
         else:
             ok, msg = False, f"Unknown field: {key}"
@@ -425,13 +386,11 @@ async def handle_set_avg(update: Update, context: ContextTypes.DEFAULT_TYPE, tex
     user_id = update.effective_user.id
     session = get_session(user_id)
     item_id = session["temp_data"].get("avg_item_id", "")
-
     try:
         avg = float(text.strip())
         ok, msg = set_avg_usage(item_id, avg)
     except ValueError:
         ok, msg = False, "Invalid number."
-
     await update.message.reply_text(msg, reply_markup=inventory_menu_keyboard())
 
 
@@ -440,7 +399,6 @@ async def handle_set_unit(update: Update, context: ContextTypes.DEFAULT_TYPE, te
     user_id = update.effective_user.id
     session = get_session(user_id)
     item_id = session["temp_data"].get("unit_item_id", "")
-
     ok, msg = set_unit(item_id, text.strip())
     await update.message.reply_text(msg, reply_markup=inventory_menu_keyboard())
 
@@ -454,10 +412,7 @@ async def handle_add_purpose(update: Update, context: ContextTypes.DEFAULT_TYPE,
 async def handle_change_secret(update: Update, context: ContextTypes.DEFAULT_TYPE, text: str):
     """Handle change secret word input."""
     change_secret_word(text.strip())
-    await update.message.reply_text(
-        "Secret word updated.",
-        reply_markup=main_menu_keyboard()
-    )
+    await update.message.reply_text("Secret word updated.", reply_markup=main_menu_keyboard())
 
 
 async def handle_adjustment(update: Update, context: ContextTypes.DEFAULT_TYPE, text: str):
@@ -490,7 +445,6 @@ async def handle_restore_select(update: Update, context: ContextTypes.DEFAULT_TY
     """Handle restore backup selection by number or path."""
     backups = get_backups()
     backup_path = None
-
     try:
         idx = int(text.strip()) - 1
         if 0 <= idx < len(backups):
@@ -499,9 +453,7 @@ async def handle_restore_select(update: Update, context: ContextTypes.DEFAULT_TY
         backup_path = text.strip()
 
     if not backup_path:
-        await update.message.reply_text(
-            "Invalid selection. Send a number from the list or the full backup path."
-        )
+        await update.message.reply_text("Invalid selection.")
         context.user_data["awaiting"] = "restore_select"
         return
 
@@ -522,6 +474,16 @@ async def handle_ai_confirmation(update: Update, context: ContextTypes.DEFAULT_T
             if isinstance(parsed, ParsedAction):
                 if parsed.action in ["check", "low stock", "list"]:
                     results.append(f"Skipped query: {parsed.item_name}")
+                    continue
+
+                # Handle delete_item separately - no stock movement needed
+                if parsed.action == "delete_item":
+                    item = find_item(parsed.item_name)
+                    if not item:
+                        results.append(f"Item '{parsed.item_name}' not found.")
+                        continue
+                    ok, msg = delete_single_item(item["item_id"])
+                    results.append(msg)
                     continue
 
                 item = find_item(parsed.item_name)
@@ -548,10 +510,7 @@ async def handle_ai_confirmation(update: Update, context: ContextTypes.DEFAULT_T
 
     elif text.lower() in ("no", "n", "cancel"):
         session["pending_actions"] = []
-        await update.message.reply_text(
-            "Action cancelled.",
-            reply_markup=main_menu_keyboard()
-        )
+        await update.message.reply_text("Action cancelled.", reply_markup=main_menu_keyboard())
     else:
         await update.message.reply_text(
             "Please reply with *yes* to confirm or *no* to cancel.",
@@ -573,12 +532,10 @@ async def try_ai_mode(update: Update, context: ContextTypes.DEFAULT_TYPE, text: 
         if stock_actions:
             session["pending_actions"] = actions
             confirmation_msg = ai_service.format_for_confirmation(actions)
-
             kb = [
                 [InlineKeyboardButton("Yes", callback_data="ai_confirm_yes"),
                  InlineKeyboardButton("No", callback_data="ai_confirm_no")],
             ]
-
             await update.message.reply_text(
                 confirmation_msg,
                 reply_markup=InlineKeyboardMarkup(kb),
