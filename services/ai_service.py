@@ -18,7 +18,7 @@ logger = logging.getLogger(__name__)
 
 GEMINI_URL = (
     "https://generativelanguage.googleapis.com/v1beta/models/"
-    "gemini-1.5-flash:generateContent"
+    "gemini-2.0-flash:generateContent"
 )
 
 # ---------------------------------------------------------------------------
@@ -102,9 +102,9 @@ class AIService:
     def __init__(self):
         self.enabled = bool(config.GEMINI_API_KEY)
         if self.enabled:
-            logger.info("Gemini AI enabled (httpx REST mode).")
+            print("[Prometheus] Gemini AI enabled (gemini-2.0-flash, httpx REST mode).")
         else:
-            logger.warning("GEMINI_API_KEY not set in .env — running in fallback (rule-based) mode only.")
+            print("[Prometheus] WARNING: GEMINI_API_KEY not set — fallback mode only.")
 
     def _build_system_prompt(self) -> str:
         return """You are Prometheus, a canteen inventory management assistant.
@@ -273,7 +273,7 @@ Respond ONLY with valid JSON (no markdown, no explanation):
         return self.parse_with_fallback(text)
 
     # ------------------------------------------------------------------
-    # Rule-based parser helpers (unchanged)
+    # Rule-based parser helpers
     # ------------------------------------------------------------------
 
     def _parse_single_action(self, text: str, full_text: str = "") -> Optional[ParsedAction]:
