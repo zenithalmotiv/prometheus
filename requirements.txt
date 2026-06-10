@@ -1,6 +1,17 @@
-python-telegram-bot==20.7
+# Core bot framework — [job-queue] is required for the daily report scheduler
+python-telegram-bot[job-queue]==20.7
+
+# Environment variable loading
 python-dotenv==1.0.0
+
+# Excel export
 openpyxl==3.1.2
-google-generativeai>=0.8.0
+
+# HTTP client used by ai_service for Gemini REST calls
+httpx==0.27.0
+
+# Async HTTP (used by python-telegram-bot internally)
 aiohttp==3.9.1
+
+# Timezone support for the IST daily-report scheduler
 pytz==2024.1
