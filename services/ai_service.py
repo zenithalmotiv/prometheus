@@ -12,7 +12,6 @@ from app.config import config
 from models import ParsedAction
 
 
-# Try importing Gemini
 try:
     import google.generativeai as genai
     GEMINI_AVAILABLE = True
@@ -23,7 +22,6 @@ except ImportError:
 # Fallback rule-based keyword map
 # ---------------------------------------------------------------------------
 MOVEMENT_KEYWORDS = {
-    # Stock movements
     "used":           ["used", "use", "consumed", "ate", "cooked", "took", "spent"],
     "purchased":      ["purchased", "bought", "buy", "ordered", "received", "got", "purchase"],
     "damaged":        ["damaged", "spoiled", "broken", "wasted", "rotten", "bad", "expired"],
@@ -34,31 +32,27 @@ MOVEMENT_KEYWORDS = {
     "garden cafe":    ["garden cafe", "sent to garden cafe", "garden"],
     "bba canteen":    ["bba canteen", "sent to bba canteen"],
     "bba tea counter":["bba tea counter", "bba tea", "sent to bba tea"],
-    # Queries
     "check":          ["check", "tell me about", "what is the stock", "how much", "stock of", "how many"],
-    "low_stock":      ["low stock", "what to order", "order list", "what should i buy", "running low", "low items"],
-    "order_list":     ["order list", "need to order", "items to order", "order"],
+    "low_stock":      ["low stock", "what to order", "what should i buy", "running low", "low items"],
+    "order_list":     ["order list", "need to order", "items to order"],
     "daily_report":   ["daily report", "today report", "report", "today's report", "todays report"],
     "list":           ["list all", "show all", "inventory list", "all items", "item list", "list items",
                        "give me the list", "show me the list", "show items", "show list"],
     "zero_stock":     ["zero stock", "out of stock", "empty stock", "no stock"],
-    # Exports
     "export_csv":     ["export csv", "give me csv", "download csv", "get csv", "csv export",
                        "send csv", "export as csv", "give me the csv"],
     "export_excel":   ["export excel", "give me excel", "download excel", "get excel", "excel export",
                        "send excel", "export as excel", "give me the excel", "xlsx"],
-    # Item management
-    "add_item":       ["add item", "new item", "add new item", "create item", "add a new", "add rice",
-                       "add sugar", "add oil", "add to inventory"],
+    "add_item":       ["add item", "new item", "add new item", "create item", "add a new",
+                       "add to inventory"],
     "delete_item":    ["delete", "remove", "delete item", "remove item", "get rid of", "drop item"],
     "set_avg":        ["set average", "set avg", "average usage", "avg usage", "daily usage"],
     "set_unit":       ["set unit", "change unit", "unit is"],
-    # Admin
     "undo":           ["undo", "undo last", "revert", "take back", "cancel last"],
     "backup":         ["backup", "create backup", "make backup", "save backup"],
     "reset_day":      ["reset day", "reset today", "new day"],
     "stock_adjust":   ["adjust stock", "set stock to", "stock adjustment", "correct stock",
-                       "change stock to", "current stock is", "update stock"],
+                       "change stock to", "update stock"],
 }
 
 UNITS = [
@@ -72,9 +66,11 @@ NO_QTY_ACTIONS = {
     "zero_stock", "export_csv", "export_excel", "undo", "backup", "reset_day"
 }
 
+# Keywords that signal an add_item sentence — don't split these on "and"
+ADD_ITEM_TRIGGERS = ["add item", "add new item", "new item", "create item", "add a new", "add to inventory"]
+
 
 class AIService:
-    """Service for AI-powered natural language understanding."""
 
     def __init__(self):
         self.enabled = config.gemini_enabled and GEMINI_AVAILABLE
@@ -123,29 +119,30 @@ Admin:
 
 RULES:
 - For add_item: extract item_name, unit, starting_stock (as quantity), avg_daily_usage
-  Example: "add item rice with 150 kg starting stock and avg use 40 kg" →
-  action=add_item, item_name=rice, unit=kg, quantity=150, avg_daily_usage=40
+  Example: "add item rice with 150 kg in starting and current stock with average use of 40 kg"
+  -> action=add_item, item_name=rice, unit=kg, quantity=150, avg_daily_usage=40
+- The WHOLE sentence is ONE add_item action even if it contains "and"
 - For stock_adjust: quantity is the NEW stock value
 - For set_avg: quantity is the new average usage value
 - For check_stock: item_name is required
 - If uncertain, set confidence below 0.7 and explain in note
-- Multiple items in one message → return array of actions
-- "give me the excel", "send excel", "export excel" → export_excel
-- "give me the list", "show all items", "item list" → list_all
-- "daily report", "today report" → daily_report
-- "low stock", "running low" → low_stock
+- Multiple items in one message -> return array of actions
+- "give me the excel", "send excel", "export excel" -> export_excel
+- "give me the list", "show all items", "item list" -> list_all
+- "daily report", "today report" -> daily_report
+- "low stock", "running low" -> low_stock
 
 Respond ONLY with valid JSON:
 {
     "actions": [
         {
-            "action": "used",
+            "action": "add_item",
             "item_name": "rice",
-            "quantity": 5,
+            "quantity": 150,
             "unit": "kg",
-            "purpose": "biriyani",
+            "purpose": "",
             "destination": "",
-            "avg_daily_usage": 0,
+            "avg_daily_usage": 40,
             "confidence": 0.95,
             "note": ""
         }
@@ -204,7 +201,6 @@ Respond ONLY with valid JSON:
             for a in actions:
                 raw_action = a.get("action", "").lower().replace(" ", "_").replace("-", "_")
                 action = action_map.get(raw_action, raw_action)
-
                 parsed_actions.append(ParsedAction(
                     action=action,
                     item_name=a.get("item_name", ""),
@@ -226,6 +222,14 @@ Respond ONLY with valid JSON:
         text_lower = text.lower().strip()
         actions = []
 
+        # If this is an add_item sentence, parse the WHOLE thing — never split on "and"
+        if any(trigger in text_lower for trigger in ADD_ITEM_TRIGGERS):
+            action = self._parse_single_action(text_lower, text_lower)
+            if action:
+                return True, [action]
+            return False, []
+
+        # For everything else, split on " and " or "," to handle multi-action sentences
         parts = re.split(r'\s+and\s+|\s*,\s*', text_lower)
         for part in parts:
             action = self._parse_single_action(part, text_lower)
@@ -239,7 +243,6 @@ Respond ONLY with valid JSON:
         src = full_text or text_lower
 
         detected_action = None
-        # Check longer/more-specific keywords first to avoid partial matches
         for action, keywords in sorted(MOVEMENT_KEYWORDS.items(), key=lambda x: -max(len(k) for k in x[1])):
             for kw in keywords:
                 if kw in src:
@@ -251,7 +254,6 @@ Respond ONLY with valid JSON:
         if not detected_action:
             return None
 
-        # No quantity / no item needed
         if detected_action in NO_QTY_ACTIONS:
             item_name = ""
             if detected_action == "check":
@@ -263,7 +265,6 @@ Respond ONLY with valid JSON:
                 raw_input=text, confidence=0.75,
             )
 
-        # delete_item
         if detected_action == "delete_item":
             item_name = self._extract_item_name_for_delete(src)
             return ParsedAction(
@@ -273,11 +274,9 @@ Respond ONLY with valid JSON:
                 raw_input=text, confidence=0.85,
             )
 
-        # add_item
         if detected_action == "add_item":
             return self._parse_add_item(src, text)
 
-        # set_avg
         if detected_action == "set_avg":
             qty = self._extract_quantity(src)
             item = self._extract_item_name_simple(src, detected_action)
@@ -288,7 +287,6 @@ Respond ONLY with valid JSON:
                 raw_input=text, confidence=0.75,
             )
 
-        # set_unit
         if detected_action == "set_unit":
             unit = self._extract_unit(src)
             item = self._extract_item_name_simple(src, detected_action)
@@ -299,7 +297,6 @@ Respond ONLY with valid JSON:
                 raw_input=text, confidence=0.75,
             )
 
-        # stock_adjust
         if detected_action == "stock_adjust":
             qty = self._extract_quantity(src)
             item = self._extract_item_name_simple(src, detected_action)
@@ -310,7 +307,6 @@ Respond ONLY with valid JSON:
                 raw_input=text, confidence=0.75,
             )
 
-        # undo / backup / reset_day
         if detected_action in ("undo", "backup", "reset_day"):
             return ParsedAction(
                 action=detected_action,
@@ -319,7 +315,6 @@ Respond ONLY with valid JSON:
                 raw_input=text, confidence=0.8,
             )
 
-        # --- Stock movements (need qty + item) ---
         quantity = self._extract_quantity(src)
         unit = self._extract_unit(src)
         item_name = self._extract_item_name(src, detected_action, quantity, unit)
@@ -345,22 +340,73 @@ Respond ONLY with valid JSON:
         )
 
     def _parse_add_item(self, text: str, raw: str) -> Optional[ParsedAction]:
-        """Extract add_item fields from natural language."""
-        # Extract quantities — look for multiple numbers
-        nums = re.findall(r'(\d+\.?\d*)', text)
-        starting_stock = float(nums[0]) if nums else 0
-        avg_daily_usage = float(nums[1]) if len(nums) > 1 else 0
+        """Extract add_item fields from natural language.
+
+        Handles sentences like:
+          'add item rice with 150kg in starting and current stock with average use of 40kg'
+          'add item sugar 50 kg avg 20 kg'
+          'add new item oil unit litre starting 100 avg 30'
+        """
         unit = self._extract_unit(text)
 
-        # Guess item name — remove keywords, numbers, units, filler
+        # ---- Extract starting_stock ----
+        # Look for a number near context words: starting, current, stock, with
+        starting_stock = 0.0
+        avg_daily_usage = 0.0
+
+        # Pattern: number [unit] near "starting" or "current"
+        stock_match = re.search(
+            r'(?:starting|current|stock|with)\s+(?:stock\s+)?(?:of\s+)?(\d+\.?\d*)\s*(?:kg|g|l|ml|pcs|piece|pieces|packet|packets|box|boxes|bottle|bottles|tin|tins|can|cans|gram|grams|litre|liter|litres)?',
+            text
+        )
+        # Also try: number [unit] followed by "in starting" or "as starting"
+        stock_match2 = re.search(
+            r'(\d+\.?\d*)\s*(?:kg|g|l|ml|pcs|piece|packet|box|bottle|tin|can|gram|grams|litre|liter)?\s*(?:in\s+)?(?:starting|current)',
+            text
+        )
+
+        if stock_match:
+            starting_stock = float(stock_match.group(1))
+        elif stock_match2:
+            starting_stock = float(stock_match2.group(1))
+
+        # ---- Extract avg_daily_usage ----
+        avg_match = re.search(
+            r'(?:average|avg|average use|avg use|average usage|avg usage|use of|usage of)\s+(?:of\s+)?(\d+\.?\d*)\s*(?:kg|g|l|ml|pcs|piece|pieces|packet|packets|box|boxes|bottle|bottles|tin|tins|can|cans|gram|grams|litre|liter|litres)?',
+            text
+        )
+        if avg_match:
+            avg_daily_usage = float(avg_match.group(1))
+
+        # Fallback: if we still have nothing, just grab all numbers in order
+        if starting_stock == 0.0:
+            nums = re.findall(r'(\d+\.?\d*)', text)
+            if nums:
+                starting_stock = float(nums[0])
+            if avg_daily_usage == 0.0 and len(nums) > 1:
+                avg_daily_usage = float(nums[1])
+
+        # ---- Extract item name ----
         name = text
-        for kw in MOVEMENT_KEYWORDS.get("add_item", []):
+        # Remove action keywords
+        for kw in ADD_ITEM_TRIGGERS:
             name = name.replace(kw, "")
+        # Remove numbers
         name = re.sub(r'\d+\.?\d*', '', name)
+        # Remove units
         for u in UNITS:
             name = re.sub(rf'\b{u}\b', '', name)
-        filler = r'\b(with|starting|current|stock|average|avg|use|usage|daily|a|an|the|and|for|of|in|kg|g|l|ml|pcs)\b'
+        # Remove filler words
+        filler = (
+            r'\b(with|starting|current|stock|average|avg|use|usage|daily|'
+            r'a|an|the|and|for|of|in|as|unit|is|are|its|into|to)\b'
+        )
         name = re.sub(filler, '', name).strip()
+        # Collapse spaces
+        name = re.sub(r'\s+', ' ', name).strip()
+
+        if not name:
+            return None
 
         return ParsedAction(
             action="add_item",
@@ -370,7 +416,7 @@ Respond ONLY with valid JSON:
             purpose="",
             destination="",
             raw_input=raw,
-            confidence=0.75,
+            confidence=0.80,
             extra={"avg_daily_usage": avg_daily_usage},
         )
 
@@ -381,7 +427,6 @@ Respond ONLY with valid JSON:
         return text.strip()
 
     def _extract_item_name_simple(self, text: str, action: str) -> str:
-        """Simple extraction: strip keywords, numbers, units."""
         result = text
         for kw in MOVEMENT_KEYWORDS.get(action, []):
             result = result.replace(kw, "")
@@ -424,7 +469,10 @@ Respond ONLY with valid JSON:
         for kw in MOVEMENT_KEYWORDS.get(action, []):
             text_clean = text_clean.replace(kw, "")
         if quantity:
-            text_clean = re.sub(rf'{re.escape(str(int(quantity) if quantity == int(quantity) else quantity))}\s*{re.escape(unit)}', '', text_clean)
+            text_clean = re.sub(
+                rf'{re.escape(str(int(quantity) if quantity == int(quantity) else quantity))}\s*{re.escape(unit)}',
+                '', text_clean
+            )
         text_clean = re.sub(r'\d+\.?\d*', '', text_clean)
         if action == "used":
             for p in [" for ", " to make ", " to prepare ", " in "]:
@@ -451,7 +499,8 @@ Respond ONLY with valid JSON:
         return self.parse_with_fallback(text)
 
     def format_for_confirmation(self, actions: list) -> str:
-        lines = ["*Please confirm these actions:*\n"]
+        """Build plain-text confirmation message (no Markdown parse_mode)."""
+        lines = ["Please confirm these actions:\n"]
         for i, action in enumerate(actions, 1):
             a = action.action
             if a in NO_QTY_ACTIONS:
@@ -463,33 +512,32 @@ Respond ONLY with valid JSON:
                     "backup": "Create Backup", "reset_day": "Reset Day",
                     "check": f"Check Stock: {action.item_name}",
                 }
-                lines.append(f"{i}. *{labels.get(a, a.title())}*")
+                lines.append(f"{i}. {labels.get(a, a.title())}")
             elif a == "delete_item":
-                lines.append(f"{i}. *Delete Item*: {action.item_name} \u26a0\ufe0f")
+                lines.append(f"{i}. DELETE ITEM: {action.item_name} (cannot be undone!)")
             elif a == "add_item":
                 avg = (action.extra or {}).get("avg_daily_usage", 0)
                 lines.append(
-                    f"{i}. *Add Item*: {action.item_name}\n"
+                    f"{i}. Add Item: {action.item_name}\n"
                     f"   Starting stock: {action.quantity} {action.unit}\n"
                     f"   Avg daily use: {avg} {action.unit}"
                 )
             elif a == "set_avg":
-                lines.append(f"{i}. *Set Avg Usage*: {action.item_name} → {action.quantity}")
+                lines.append(f"{i}. Set Avg Usage: {action.item_name} -> {action.quantity}")
             elif a == "set_unit":
-                lines.append(f"{i}. *Set Unit*: {action.item_name} → {action.unit}")
+                lines.append(f"{i}. Set Unit: {action.item_name} -> {action.unit}")
             elif a == "stock_adjust":
-                lines.append(f"{i}. *Adjust Stock*: {action.item_name} → {action.quantity}")
+                lines.append(f"{i}. Adjust Stock: {action.item_name} -> {action.quantity}")
             else:
                 lines.append(
-                    f"{i}. *{a.title()}*: {action.quantity} {action.unit} of {action.item_name}"
+                    f"{i}. {a.title()}: {action.quantity} {action.unit} of {action.item_name}"
                 )
                 if action.purpose:
                     lines.append(f"   Purpose: {action.purpose}")
                 if action.destination:
                     lines.append(f"   Destination: {action.destination.title()}")
-        lines.append("\nReply with *yes* to confirm, or *no* to cancel.")
+        lines.append("\nReply with YES to confirm, or NO to cancel.")
         return "\n".join(lines)
 
 
-# Global AI service instance
 ai_service = AIService()
