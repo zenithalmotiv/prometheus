@@ -4,7 +4,7 @@ Data models and validation schemas.
 """
 
 from dataclasses import dataclass, field
-from typing import Optional, List
+from typing import Any, Dict, Optional, List
 from datetime import datetime
 
 
@@ -71,7 +71,7 @@ class UndoEntry:
 @dataclass
 class ParsedAction:
     """Represents a parsed action from AI or command input."""
-    action: str  # e.g. 'used', 'purchased', 'damaged'
+    action: str
     item_name: str
     quantity: float
     unit: str = ""
@@ -79,3 +79,4 @@ class ParsedAction:
     destination: str = ""
     raw_input: str = ""
     confidence: float = 1.0
+    extra: Optional[Dict[str, Any]] = field(default_factory=dict)
